@@ -24,19 +24,27 @@ def capture_loop(screen_capture: ScreenCapture, image_queue: queue.Queue,
                  config: dict, pause_event: threading.Event):
     """キャプチャスレッド: 一定間隔でスクリーンショットを取得。"""
     interval = config.get("capture_interval", 15)
+    enable_focus = config.get("enable_focus", True)
     while True:
         if not pause_event.is_set():
             try:
-                img = screen_capture.capture()
-                if img is not None:
+                if enable_focus:
+                    result = screen_capture.capture_with_focus()
+                else:
+                    img = screen_capture.capture()
+                    result = {"full_image": img, "focus_image": None,
+                              "focus_label": None, "focus_diff": 0.0} if img else None
+
+                if result is not None:
                     # 古い画像を捨てて最新のみ保持
                     while not image_queue.empty():
                         try:
                             image_queue.get_nowait()
                         except queue.Empty:
                             break
-                    image_queue.put(img)
-                    logger.info("キャプチャ完了、AI分析キューに追加")
+                    image_queue.put(result)
+                    logger.info("キャプチャ完了、AI分析キューに追加 (focus=%s)",
+                                result.get("focus_label"))
                 else:
                     logger.debug("画面変化なし、スキップ")
             except Exception:
@@ -49,18 +57,26 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
     """AIスレッド: 画像を受け取りコメント生成。"""
     while True:
         try:
-            image_base64 = image_queue.get()  # ブロッキング
+            data = image_queue.get()  # ブロッキング
             logger.info("AI分析開始...")
-            comments = ai_analyzer.analyze(image_base64)
+
+            comments = ai_analyzer.analyze(
+                full_image=data["full_image"],
+                focus_image=data.get("focus_image"),
+            )
             if comments:
                 comment_queue.put(comments)
-                logger.info("コメント生成: %d個", len(comments))
+                logger.info("コメント生成: %d個 (comment_queue=%d)", len(comments), comment_queue.qsize())
                 # コメントログをファイルに記録
                 try:
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    focus_info = data.get("focus_label") or "-"
+                    focus_diff = data.get("focus_diff", 0.0)
+                    scene = ai_analyzer._prev_scene or "-"
                     with open("comments.log", "a", encoding="utf-8") as f:
+                        f.write(f"[{now}] focus={focus_info} diff={focus_diff:.3f} scene={scene}\n")
                         for c in comments:
-                            f.write(f"[{now}] {c.get('text', '')}  (color: {c.get('color', '')})\n")
+                            f.write(f"[{now}]   {c.get('text', '')}  (color: {c.get('color', '')})\n")
                 except Exception:
                     logger.exception("コメントログ書き込み失敗")
             else:
@@ -112,12 +128,21 @@ def main():
     overlay.show()
 
     # システムトレイ
+    def change_persona(key: str):
+        ai_analyzer.persona = key
+        logger.info("ペルソナ変更: %s", key)
+
+    def resume():
+        pause_event.clear()
+        ai_analyzer.reset_scene()
+
     tray = SystemTray(
         app=app,
         config=config,
         on_pause=lambda: pause_event.set(),
-        on_resume=lambda: pause_event.clear(),
+        on_resume=resume,
         on_quit=app.quit,
+        on_persona_change=change_persona,
     )
 
     logger.info("BackseatSimulator 起動完了")

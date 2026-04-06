@@ -1,14 +1,25 @@
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor
-from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QApplication
+from PyQt5.QtWidgets import (
+    QSystemTrayIcon, QMenu, QAction, QActionGroup, QApplication,
+)
+
+PERSONA_LABELS = {
+    "mix": "ミックス",
+    "shijicyu": "視聴者",
+    "home": "応援",
+    "jikkyo": "実況",
+}
 
 
 class SystemTray:
     def __init__(self, app: QApplication, config: dict,
-                 on_pause: callable, on_resume: callable, on_quit: callable):
+                 on_pause: callable, on_resume: callable, on_quit: callable,
+                 on_persona_change: callable = None):
         self.app = app
         self.is_paused = False
         self.on_pause = on_pause
         self.on_resume = on_resume
+        self.on_persona_change = on_persona_change
 
         # 簡易アイコン生成（緑の四角）
         pixmap = QPixmap(32, 32)
@@ -30,9 +41,21 @@ class SystemTray:
         self.pause_action.triggered.connect(self._toggle_pause)
         menu.addAction(self.pause_action)
 
-        settings_action = QAction("設定...", menu)
-        settings_action.setEnabled(False)
-        menu.addAction(settings_action)
+        # ペルソナ切替サブメニュー
+        current_persona = config.get("persona", "shijicyu")
+        if isinstance(current_persona, list):
+            current_persona = current_persona[0]
+        persona_menu = QMenu("ペルソナ", menu)
+        persona_group = QActionGroup(persona_menu)
+        persona_group.setExclusive(True)
+        for key, label in PERSONA_LABELS.items():
+            action = QAction(label, persona_menu, checkable=True)
+            action.setChecked(key == current_persona)
+            action.setData(key)
+            action.triggered.connect(lambda checked, k=key: self._change_persona(k))
+            persona_group.addAction(action)
+            persona_menu.addAction(action)
+        menu.addMenu(persona_menu)
 
         menu.addSeparator()
 
@@ -52,3 +75,7 @@ class SystemTray:
             self.is_paused = True
             self.pause_action.setText("再開")
             self.on_pause()
+
+    def _change_persona(self, key: str):
+        if self.on_persona_change:
+            self.on_persona_change(key)

@@ -13,8 +13,13 @@ ollama_url: "http://localhost:11434"
 persona: "mix"                 # プロンプトプリセット名
 visual_token_budget: 140      # ビジュアルトークン予算 (70/140/280)
 
+# --- フォーカス ---
+enable_focus: true             # 動的フォーカス機能の有効/無効
+focus_grid: [3, 3]             # グリッド分割 [rows, cols]
+focus_diff_threshold: 0.05     # フォーカス対象とするdiff閾値
+focus_crop_size: 640           # クロップ画像の長辺 (px)
+
 # --- オーバーレイ ---
 font_size: 36
 scroll_speed: 3.0             # px/frame
 max_comments: 20
-drip_interval: 2.0            # コメントを流す間隔（秒）
