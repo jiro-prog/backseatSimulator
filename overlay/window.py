@@ -3,7 +3,7 @@ import queue
 import random
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import QApplication, QWidget
 
 from overlay.comment import Comment
@@ -38,6 +38,15 @@ class OverlayWindow(QWidget):
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(screen)
 
+        # スロット管理（重なり回避）
+        line_height = int(self.font_size * 1.6)
+        usable_top = int(screen.height() * 0.1)
+        usable_bottom = int(screen.height() * 0.9)
+        self._slot_y = list(range(usable_top + line_height, usable_bottom, line_height))
+        self._font_metrics = QFontMetrics(
+            QFont("Meiryo UI", self.font_size, QFont.Bold)
+        )
+
         # アニメーションタイマー（約60fps）
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_frame)
@@ -54,29 +63,64 @@ class OverlayWindow(QWidget):
         for c in greeting:
             self._pending.append(c)
 
+    def _find_free_slot(self, text_width: int) -> int | None:
+        """空きスロットを返す。なければNone。"""
+        screen_w = QApplication.primaryScreen().geometry().width()
+        gap = self.font_size * 2  # コメント間の最小余白
+
+        # 各スロットの最右端を計算
+        rightmost: dict[int, float] = {}
+        for c in self.comments:
+            if c.slot < 0:
+                continue
+            right_edge = c.x_pos + c.text_width
+            if c.slot not in rightmost or right_edge > rightmost[c.slot]:
+                rightmost[c.slot] = right_edge
+
+        candidates = []
+        for i in range(len(self._slot_y)):
+            if i not in rightmost:
+                candidates.append(i)
+            elif rightmost[i] + gap < screen_w:
+                candidates.append(i)
+
+        if not candidates:
+            return None
+        return random.choice(candidates)
+
+    def _try_add_comment(self, raw: dict) -> bool:
+        """1個のコメントをスロットに配置。成功したらTrue。"""
+        if len(self.comments) >= self.max_comments:
+            return False
+        text = raw.get("text", "")
+        color = raw.get("color", "#FFFFFF")
+        if not text:
+            return True  # 空テキストは消化済み扱い
+
+        text_width = self._font_metrics.horizontalAdvance(text)
+        slot = self._find_free_slot(text_width)
+        if slot is None:
+            return False
+
+        screen_w = QApplication.primaryScreen().geometry().width()
+        comment = Comment(
+            text=text,
+            color=color,
+            y_pos=self._slot_y[slot],
+            x_pos=float(screen_w),
+            speed=self.scroll_speed,
+            font_size=self.font_size,
+            slot=slot,
+            text_width=text_width,
+        )
+        self.comments.append(comment)
+        return True
+
     def add_comments(self, raw_comments: list[dict]):
         """AIからの生データをCommentオブジェクトに変換して追加。"""
-        screen = QApplication.primaryScreen().geometry()
-        screen_h = screen.height()
-        screen_w = screen.width()
-
         for raw in raw_comments:
-            if len(self.comments) >= self.max_comments:
+            if not self._try_add_comment(raw):
                 break
-            text = raw.get("text", "")
-            color = raw.get("color", "#FFFFFF")
-            if not text:
-                continue
-            y = random.randint(int(screen_h * 0.1), int(screen_h * 0.9))
-            comment = Comment(
-                text=text,
-                color=color,
-                y_pos=y,
-                x_pos=float(screen_w),
-                speed=self.scroll_speed,
-                font_size=self.font_size,
-            )
-            self.comments.append(comment)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -118,8 +162,8 @@ class OverlayWindow(QWidget):
         self._frame_count += 1
         if self._pending and self._frame_count >= self._drip_frames:
             self._frame_count = 0
-            raw = self._pending.popleft()
-            self.add_comments([raw])
+            if self._try_add_comment(self._pending[0]):
+                self._pending.popleft()
 
         # 全コメント更新
         for comment in self.comments:

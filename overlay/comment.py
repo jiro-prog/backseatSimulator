@@ -10,6 +10,8 @@ class Comment:
     x_pos: float
     speed: float
     font_size: int
+    slot: int = -1
+    text_width: int = 0
     created_at: float = field(default_factory=time.time)
 
     def is_offscreen(self) -> bool:

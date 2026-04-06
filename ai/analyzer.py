@@ -11,6 +11,8 @@ from ai.prompts import PERSONAS
 logger = logging.getLogger(__name__)
 
 COLORS_ACCENT = ["#FF4444", "#44FF44", "#FFFF00", "#FF69B4", "#87CEEB"]
+NG_WORDS = ["すごい", "すごく", "なんか", "実況", "ツッコミ", "カテゴリ", "コメント", "リアクション", "応援"]
+PREFIX_LEN = 2  # 先頭N文字一致で表記ゆれ重複を判定（4文字以上のコメントのみ適用）
 
 
 class AIAnalyzer:
@@ -121,12 +123,26 @@ class AIAnalyzer:
             # コード片・ログ文字列っぽいものだけ弾く
             if re.search(r'[{}\[\]\\/:;=]', text):
                 continue
+            # NGワードフィルター
+            if any(ng in text for ng in NG_WORDS):
+                continue
             result.append({"text": text, "color": self._assign_color()})
 
-        # 前回と同じコメントを弾く
-        result = [c for c in result if c["text"] not in self._recent_texts]
+        # 前回と同じコメントを弾く（先頭一致で表記ゆれもカバー、4文字以上のみ）
+        recent_prefixes = {t[:PREFIX_LEN] for t in self._recent_texts if len(t) >= 4}
+        filtered = []
         for c in result:
+            text = c["text"]
+            if text in self._recent_texts:
+                continue
+            if len(text) >= 4 and text[:PREFIX_LEN] in recent_prefixes:
+                continue
+            filtered.append(c)
+            if len(text) >= 4:
+                recent_prefixes.add(text[:PREFIX_LEN])
+        for c in filtered:
             self._recent_texts.append(c["text"])
+        result = filtered
 
         return result
 
