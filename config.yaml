@@ -1,0 +1,20 @@
+# BackseatSimulator 設定ファイル
+
+# --- キャプチャ ---
+capture_interval: 8           # キャプチャ間隔（秒）
+capture_mode: active_window   # active_window | full_desktop
+image_max_size: 1280          # リサイズ長辺 (px)
+change_threshold: 0.05        # 差分検知の閾値
+max_skip_count: 4             # 差分なしでもN回に1回は強制キャプチャ
+
+# --- AI ---
+model_name: "gemma4:e2b"
+ollama_url: "http://localhost:11434"
+persona: "shijicyu"           # プロンプトプリセット名
+visual_token_budget: 140      # ビジュアルトークン予算 (70/140/280)
+
+# --- オーバーレイ ---
+font_size: 36
+scroll_speed: 3.0             # px/frame
+max_comments: 20
+drip_interval: 2.0            # コメントを流す間隔（秒）
