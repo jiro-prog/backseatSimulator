@@ -6,7 +6,8 @@ import re
 
 import requests
 
-from ai.prompts import PERSONAS, SCENE_CONTEXT_TEMPLATE
+from ai.prompts import (PERSONAS, SCENE_CONTINUE_TEMPLATE,
+                        SCENE_TRANSITION_TEMPLATE, WINDOW_TITLE_TEMPLATE)
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,10 @@ class AIAnalyzer:
         self.visual_token_budget = config.get("visual_token_budget", 70)
         self._recent_texts: collections.deque = collections.deque(maxlen=100)
         self._prev_scene: str | None = None
+        self._prev_window_title: str = ""
 
-    def analyze(self, full_image: str, focus_image: str | None = None) -> list[dict]:
+    def analyze(self, full_image: str, focus_image: str | None = None,
+                window_title: str = "") -> list[dict]:
         """Ollama APIにリクエストを送り、コメントリストを返す。"""
         persona = PERSONAS.get(self.persona, PERSONAS["shijicyu"])
 
@@ -36,10 +39,20 @@ class AIAnalyzer:
             images = [full_image]
             user_prompt = persona["user"]
 
-        # 前回sceneをコンテクストとして注入
+        # コンテクスト注入
         system_prompt = persona["system"]
+        if window_title:
+            system_prompt += WINDOW_TITLE_TEMPLATE.format(window_title=window_title)
         if self._prev_scene:
-            system_prompt += SCENE_CONTEXT_TEMPLATE.format(prev_scene=self._prev_scene)
+            # ウィンドウが変わった = 場面転換、同じ = 同一場面継続
+            if window_title and self._prev_window_title and window_title != self._prev_window_title:
+                system_prompt += SCENE_TRANSITION_TEMPLATE.format(
+                    prev_window=self._prev_window_title,
+                    prev_scene=self._prev_scene,
+                    window=window_title,
+                )
+            else:
+                system_prompt += SCENE_CONTINUE_TEMPLATE.format(prev_scene=self._prev_scene)
 
         payload = {
             "model": self.model_name,
@@ -97,6 +110,8 @@ class AIAnalyzer:
             return []
 
         comments = self._parse_response(raw)
+        if window_title:
+            self._prev_window_title = window_title
         return comments
 
     def _parse_response(self, raw: str) -> list[dict]:
@@ -174,6 +189,7 @@ class AIAnalyzer:
     def reset_scene(self):
         """一時停止→再開時などにsceneをクリアする。"""
         self._prev_scene = None
+        self._prev_window_title = ""
 
     def _assign_color(self) -> str:
         if random.random() < 0.2:

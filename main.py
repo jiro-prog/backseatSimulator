@@ -1,5 +1,6 @@
 import datetime
 import logging
+import os
 import queue
 import sys
 import threading
@@ -33,7 +34,8 @@ def capture_loop(screen_capture: ScreenCapture, image_queue: queue.Queue,
                 else:
                     img = screen_capture.capture()
                     result = {"full_image": img, "focus_image": None,
-                              "focus_label": None, "focus_diff": 0.0} if img else None
+                              "focus_label": None, "focus_diff": 0.0,
+                              "window_title": screen_capture._get_window_title()} if img else None
 
                 if result is not None:
                     # 古い画像を捨てて最新のみ保持
@@ -63,6 +65,7 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
             comments = ai_analyzer.analyze(
                 full_image=data["full_image"],
                 focus_image=data.get("focus_image"),
+                window_title=data.get("window_title", ""),
             )
             if comments:
                 comment_queue.put(comments)
@@ -73,8 +76,9 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
                     focus_info = data.get("focus_label") or "-"
                     focus_diff = data.get("focus_diff", 0.0)
                     scene = ai_analyzer._prev_scene or "-"
+                    win_title = data.get("window_title", "")
                     with open("comments.log", "a", encoding="utf-8") as f:
-                        f.write(f"[{now}] focus={focus_info} diff={focus_diff:.3f} scene={scene}\n")
+                        f.write(f"[{now}] focus={focus_info} diff={focus_diff:.3f} window={win_title} scene={scene}\n")
                         for c in comments:
                             f.write(f"[{now}]   {c.get('text', '')}  (color: {c.get('color', '')})\n")
                 except Exception:
@@ -136,6 +140,10 @@ def main():
         pause_event.clear()
         ai_analyzer.reset_scene()
 
+    def restart():
+        logger.info("再起動します...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     tray = SystemTray(
         app=app,
         config=config,
@@ -143,6 +151,7 @@ def main():
         on_resume=resume,
         on_quit=app.quit,
         on_persona_change=change_persona,
+        on_restart=restart,
     )
 
     logger.info("BackseatSimulator 起動完了")

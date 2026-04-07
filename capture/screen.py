@@ -145,6 +145,7 @@ class ScreenCapture:
             "focus_image": focus_image,
             "focus_label": focus_label,
             "focus_diff": focus_diff,
+            "window_title": self._get_window_title(),
         }
 
     def _compute_grid_diff(
@@ -241,6 +242,16 @@ class ScreenCapture:
             return _GRID_LABELS[row][col]
         except IndexError:
             return f"({row},{col})"
+
+    def _get_window_title(self) -> str:
+        """アクティブウィンドウのタイトルを取得。"""
+        if win32gui is None:
+            return ""
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            return win32gui.GetWindowText(hwnd) or ""
+        except Exception:
+            return ""
 
     def _grab(self) -> Image.Image | None:
         if self.capture_mode == "active_window" and win32gui is not None:

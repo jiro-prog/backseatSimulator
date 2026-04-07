@@ -4,22 +4,22 @@ from PyQt5.QtWidgets import (
 )
 
 PERSONA_LABELS = {
-    "mix": "ミックス",
     "shijicyu": "視聴者",
     "home": "応援",
-    "jikkyo": "実況",
 }
 
 
 class SystemTray:
     def __init__(self, app: QApplication, config: dict,
                  on_pause: callable, on_resume: callable, on_quit: callable,
-                 on_persona_change: callable = None):
+                 on_persona_change: callable = None,
+                 on_restart: callable = None):
         self.app = app
         self.is_paused = False
         self.on_pause = on_pause
         self.on_resume = on_resume
         self.on_persona_change = on_persona_change
+        self.on_restart = on_restart
 
         # 簡易アイコン生成（緑の四角）
         pixmap = QPixmap(32, 32)
@@ -59,6 +59,10 @@ class SystemTray:
 
         menu.addSeparator()
 
+        restart_action = QAction("再起動", menu)
+        restart_action.triggered.connect(self._restart)
+        menu.addAction(restart_action)
+
         quit_action = QAction("終了", menu)
         quit_action.triggered.connect(on_quit)
         menu.addAction(quit_action)
@@ -75,6 +79,10 @@ class SystemTray:
             self.is_paused = True
             self.pause_action.setText("再開")
             self.on_pause()
+
+    def _restart(self):
+        if self.on_restart:
+            self.on_restart()
 
     def _change_persona(self, key: str):
         if self.on_persona_change:
