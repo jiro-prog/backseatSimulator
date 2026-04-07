@@ -3,15 +3,18 @@ import collections
 import io
 import json
 import logging
+import os
 import random
 import re
 
+import numpy as np
+import scipy.io.wavfile
 import torch
 from PIL import Image
 from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
-from ai.prompts import (PERSONAS, SCENE_CONTINUE_TEMPLATE,
-                        SCENE_TRANSITION_TEMPLATE, WINDOW_TITLE_TEMPLATE)
+from ai.prompts import (AUDIO_SUFFIX, FOCUS_SUFFIX, PERSONAS,
+                        WINDOW_TITLE_TEMPLATE)
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +82,88 @@ def load_model(config: dict) -> tuple:
     if ple_offload:
         _setup_ple_cpu_lookup(model)
 
+    if config.get("vision_fp16", False):
+        _dequantize_vision_tower(model, model_id)
+
     logger.info("モデルロード完了 (VRAM allocated=%.0f MiB, reserved=%.0f MiB)",
                 torch.cuda.memory_allocated() / 1024**2,
                 torch.cuda.memory_reserved() / 1024**2)
     return model, processor
+
+
+def _dequantize_vision_tower(model, model_id: str):
+    """vision_tower内の量子化Linear層をfp16で再ロードして差し替える。"""
+    import bitsandbytes as bnb
+    from safetensors import safe_open
+    from huggingface_hub import snapshot_download
+
+    model_path = snapshot_download(model_id, local_files_only=True)
+
+    # safetensorsからvision_tower関連のweightを読み込み
+    import glob as glob_mod
+    st_files = glob_mod.glob(os.path.join(model_path, "*.safetensors"))
+
+    # 量子化されたLinear層を特定
+    quantized_modules = {}
+    for name, module in model.named_modules():
+        if "vision_tower" in name and isinstance(module, bnb.nn.Linear4bit):
+            quantized_modules[name] = module
+    logger.info("vision_tower内の量子化Linear層: %d個", len(quantized_modules))
+
+    if not quantized_modules:
+        logger.info("量子化Linear層なし、スキップ")
+        return
+
+    # safetensorsから元のweightを読み込んでマッピング
+    original_weights = {}
+    for st_file in st_files:
+        with safe_open(st_file, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if "vision_tower" in key:
+                    original_weights[key] = f.get_tensor(key)
+
+    # 量子化Linear層をtorch.nn.Linearに差し替え
+    replaced = 0
+    for module_name, bnb_module in quantized_modules.items():
+        weight_key = module_name + ".weight"
+        bias_key = module_name + ".bias"
+
+        if weight_key not in original_weights:
+            logger.warning("weightが見つからない: %s", weight_key)
+            continue
+
+        w = original_weights[weight_key].to(torch.bfloat16)
+        b = original_weights.get(bias_key)
+        if b is not None:
+            b = b.to(torch.bfloat16)
+
+        new_linear = torch.nn.Linear(
+            w.shape[1], w.shape[0],
+            bias=b is not None,
+            dtype=torch.bfloat16,
+            device="cuda:0",
+        )
+        new_linear.weight.data.copy_(w)
+        if b is not None:
+            new_linear.bias.data.copy_(b)
+
+        # モジュールツリー内で差し替え
+        parts = module_name.split(".")
+        parent = model
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, parts[-1], new_linear)
+        replaced += 1
+
+    logger.info("vision_tower: %d/%d Linear層をbf16に差し替え完了", replaced, len(quantized_modules))
+
+    # 検証
+    vt_dtypes = set()
+    for name, param in model.named_parameters():
+        if "vision_tower" in name:
+            vt_dtypes.add(str(param.dtype))
+    logger.info("vision_tower dtypes (差し替え後): %s", vt_dtypes)
+    logger.info("VRAM after vision_fp16: %.0f MiB", torch.cuda.memory_allocated() / 1024**2)
 
 
 def _setup_ple_cpu_lookup(model):
@@ -115,48 +196,50 @@ class AIAnalyzer:
         self.visual_token_budget = config.get("visual_token_budget", 70)
         self.max_new_tokens = config.get("max_new_tokens", 256)
         self._recent_texts: collections.deque = collections.deque(maxlen=100)
-        self._prev_scene: str | None = None
         self._prev_window_title: str = ""
+        self._debug_dump_countdown: int = 2 if config.get("debug_dump", False) else 0
 
     def analyze(self, full_image: str, focus_image: str | None = None,
-                window_title: str = "") -> list[dict]:
+                window_title: str = "",
+                audio_data: "np.ndarray | None" = None) -> list[dict]:
         """Transformersでインプロセス推論し、コメントリストを返す。"""
         persona = PERSONAS.get(self.persona, PERSONAS["shijicyu"])
 
         # base64 → PIL.Image 変換
         pil_full = self._b64_to_pil(full_image)
+        pil_focus = self._b64_to_pil(focus_image) if focus_image else None
 
-        if focus_image:
-            pil_focus = self._b64_to_pil(focus_image)
-            user_prompt = persona.get("user_with_focus", persona["user"])
-        else:
-            pil_focus = None
-            user_prompt = persona["user"]
+        # userプロンプト連結方式（ベース + focus + audio）
+        user_prompt = persona["user"]
+        if pil_focus:
+            user_prompt = user_prompt.rstrip("。") + "。" + FOCUS_SUFFIX
+        if audio_data is not None:
+            user_prompt = user_prompt.rstrip("。") + "。" + AUDIO_SUFFIX
 
         # コンテクスト注入
         system_prompt = persona["system"]
         if window_title:
             system_prompt += WINDOW_TITLE_TEMPLATE.format(window_title=window_title)
-        if self._prev_scene:
-            if window_title and self._prev_window_title and window_title != self._prev_window_title:
-                system_prompt += SCENE_TRANSITION_TEMPLATE.format(
-                    prev_window=self._prev_window_title,
-                    prev_scene=self._prev_scene,
-                    window=window_title,
-                )
-            else:
-                system_prompt += SCENE_CONTINUE_TEMPLATE.format(prev_scene=self._prev_scene)
 
         # messages 構築 (Transformers chat template形式)
         user_content = [{"type": "image", "image": pil_full}]
         if pil_focus:
             user_content.append({"type": "image", "image": pil_focus})
+        if audio_data is not None:
+            user_content.append({"type": "audio", "audio": audio_data})
         user_content.append({"type": "text", "text": user_prompt})
 
         messages = [
             {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
             {"role": "user", "content": user_content},
         ]
+
+        # デバッグダンプ: 推論に渡すデータを1回だけ保存（2サイクル目で実行）
+        if self._debug_dump_countdown > 0:
+            self._debug_dump_countdown -= 1
+            if self._debug_dump_countdown == 0:
+                self._save_debug_dump(pil_full, pil_focus, audio_data,
+                                      system_prompt, user_prompt)
 
         # visual_token_budget の適用（focus時は2倍）
         token_budget = self.visual_token_budget * 2 if pil_focus else self.visual_token_budget
@@ -209,7 +292,7 @@ class AIAnalyzer:
         return Image.open(io.BytesIO(base64.b64decode(b64_str)))
 
     def _parse_response(self, raw: str) -> list[dict]:
-        """AI応答をパースしてコメントリストを返す。sceneは内部で保持。"""
+        """AI応答をパースしてコメントリストを返す。"""
         comments = []
 
         # 前処理: thinking タグ除去
@@ -224,12 +307,6 @@ class AIAnalyzer:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
-                scene = parsed.get("scene")
-                if isinstance(scene, str) and scene:
-                    if len(scene) > 50:
-                        scene = scene[:50]
-                    self._prev_scene = scene
-                    logger.info("scene: %s", scene)
                 comments_raw = parsed.get("comments")
                 if isinstance(comments_raw, list):
                     comments = comments_raw
@@ -247,12 +324,6 @@ class AIAnalyzer:
                 try:
                     parsed = json.loads(brace_match.group())
                     if isinstance(parsed, dict):
-                        scene = parsed.get("scene")
-                        if isinstance(scene, str) and scene:
-                            if len(scene) > 50:
-                                scene = scene[:50]
-                            self._prev_scene = scene
-                            logger.info("scene: %s", scene)
                         comments_raw = parsed.get("comments")
                         if isinstance(comments_raw, list):
                             comments = comments_raw
@@ -299,10 +370,27 @@ class AIAnalyzer:
 
         return result
 
-    def reset_scene(self):
-        """一時停止→再開時などにsceneをクリアする。"""
-        self._prev_scene = None
-        self._prev_window_title = ""
+    def _save_debug_dump(self, pil_full, pil_focus, audio_data,
+                          system_prompt, user_prompt):
+        """推論に渡すデータをdebug_dump/ディレクトリに保存する。"""
+        dump_dir = "debug_dump"
+        os.makedirs(dump_dir, exist_ok=True)
+        try:
+            pil_full.save(os.path.join(dump_dir, "full.png"))
+            if pil_focus is not None:
+                pil_focus.save(os.path.join(dump_dir, "focus.png"))
+            if audio_data is not None:
+                wav_path = os.path.join(dump_dir, "audio.wav")
+                audio_int16 = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
+                scipy.io.wavfile.write(wav_path, 16000, audio_int16)
+            with open(os.path.join(dump_dir, "prompt.txt"), "w", encoding="utf-8") as f:
+                f.write("=== SYSTEM PROMPT ===\n")
+                f.write(system_prompt)
+                f.write("\n\n=== USER PROMPT ===\n")
+                f.write(user_prompt)
+            logger.info("デバッグダンプ保存: %s", dump_dir)
+        except Exception:
+            logger.exception("デバッグダンプ保存失敗")
 
     def _assign_color(self) -> str:
         if random.random() < 0.2:

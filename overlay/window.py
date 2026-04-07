@@ -63,6 +63,11 @@ class OverlayWindow(QWidget):
         self.timer.timeout.connect(self._update_frame)
         self.timer.start(16)
 
+        # 最前面維持タイマー（5秒ごと）
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.timeout.connect(self._raise_topmost)
+        self._topmost_timer.start(5000)
+
         # 起動時の挨拶コメント
         greeting = [
             {"text": "わこつ", "color": "#FFFFFF"},
@@ -158,6 +163,22 @@ class OverlayWindow(QWidget):
             painter.drawText(x, y, comment.text)
 
         painter.end()
+
+    def _raise_topmost(self):
+        """Win32 APIで直接最前面に設定する。"""
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            HWND_TOPMOST = -1
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            )
+        except Exception:
+            pass
 
     def _get_drip_interval(self) -> float | None:
         """pending残量に基づいてドリップ間隔を返す。Noneなら停止。"""

@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 import yaml
 
 from ai.analyzer import AIAnalyzer, load_model  # torch を PyQt5 より先に読み込む
@@ -56,17 +57,27 @@ def capture_loop(screen_capture: ScreenCapture, image_queue: queue.Queue,
 
 
 def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
-            comment_queue: queue.Queue):
+            comment_queue: queue.Queue, audio_capture=None):
     """AIスレッド: 画像を受け取りコメント生成。"""
     while True:
         try:
             data = image_queue.get()  # ブロッキング
             logger.info("AI分析開始...")
 
+            # 音声スナップショット取得
+            audio_data = None
+            if audio_capture is not None:
+                audio_data = audio_capture.get_audio()
+                if audio_data is not None:
+                    rms = float(np.sqrt(np.mean(audio_data ** 2)))
+                    logger.info("音声取得: %.1f秒, RMS=%.4f",
+                                len(audio_data) / 16000, rms)
+
             comments = ai_analyzer.analyze(
                 full_image=data["full_image"],
                 focus_image=data.get("focus_image"),
                 window_title=data.get("window_title", ""),
+                audio_data=audio_data,
             )
             if comments:
                 comment_queue.put(comments)
@@ -76,10 +87,10 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     focus_info = data.get("focus_label") or "-"
                     focus_diff = data.get("focus_diff", 0.0)
-                    scene = ai_analyzer._prev_scene or "-"
                     win_title = data.get("window_title", "")
+                    audio_info = f"{len(audio_data)/16000:.1f}s" if audio_data is not None else "-"
                     with open("comments.log", "a", encoding="utf-8") as f:
-                        f.write(f"[{now}] focus={focus_info} diff={focus_diff:.3f} window={win_title} scene={scene}\n")
+                        f.write(f"[{now}] focus={focus_info} diff={focus_diff:.3f} window={win_title} audio={audio_info}\n")
                         for c in comments:
                             f.write(f"[{now}]   {c.get('text', '')}  (color: {c.get('color', '')})\n")
                 except Exception:
@@ -119,6 +130,18 @@ def main():
         logger.exception("モデルロード失敗")
         sys.exit(1)
 
+    # 音声キャプチャ初期化
+    audio_capture = None
+    if config.get("enable_audio", False):
+        from capture.audio import AudioCapture
+        try:
+            audio_capture = AudioCapture(config)
+            audio_capture.start()
+            print("音声キャプチャ開始")
+        except Exception as e:
+            logger.warning("音声キャプチャの初期化に失敗（音声なしで継続）: %s", e)
+            audio_capture = None
+
     # キュー作成
     image_queue: queue.Queue = queue.Queue(maxsize=1)
     comment_queue: queue.Queue = queue.Queue()
@@ -141,7 +164,7 @@ def main():
     # AIスレッド起動
     ai_thread = threading.Thread(
         target=ai_loop,
-        args=(ai_analyzer, image_queue, comment_queue),
+        args=(ai_analyzer, image_queue, comment_queue, audio_capture),
         daemon=True,
     )
     ai_thread.start()
@@ -163,7 +186,6 @@ def main():
 
     def resume():
         pause_event.clear()
-        ai_analyzer.reset_scene()
 
     def restart():
         logger.info("再起動します...")

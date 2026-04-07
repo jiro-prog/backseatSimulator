@@ -9,3 +9,4 @@ torch>=2.4.0
 torchvision>=0.19.0
 accelerate>=1.0.0
 librosa>=0.10.0
+pyaudiowpatch>=0.2.12

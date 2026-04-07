@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 comments.log
 .claude/
+.lock
+debug_dump/
+launch.log
+test_*.py
