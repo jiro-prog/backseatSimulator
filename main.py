@@ -1,18 +1,19 @@
+import os
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import datetime
 import logging
-import os
+import msvcrt
 import queue
 import sys
 import threading
 import time
 
 import yaml
-from PyQt5.QtWidgets import QApplication
 
-from ai.analyzer import AIAnalyzer
+from ai.analyzer import AIAnalyzer, load_model  # torch を PyQt5 より先に読み込む
 from capture.screen import ScreenCapture
-from overlay.window import OverlayWindow
-from tray.system_tray import SystemTray
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,6 +91,15 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
 
 
 def main():
+    # 多重起動防止
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".lock")
+    lock_file = open(lock_path, "w")
+    try:
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        print("BackseatSimulator は既に起動しています。")
+        sys.exit(1)
+
     # 設定読み込み
     try:
         with open("config.yaml", encoding="utf-8") as f:
@@ -98,13 +108,24 @@ def main():
         logger.warning("config.yaml が見つかりません。デフォルト設定で起動します。")
         config = {}
 
+    # モデルロード（AIスレッド起動前）
+    print("モデルをロード中...")
+    try:
+        model, processor = load_model(config)
+        print("モデルロード完了")
+        os.environ["HF_HUB_OFFLINE"] = "1"  # ロード完了後に外部通信を遮断
+    except Exception as e:
+        print(f"モデルロード失敗: {e}")
+        logger.exception("モデルロード失敗")
+        sys.exit(1)
+
     # キュー作成
     image_queue: queue.Queue = queue.Queue(maxsize=1)
     comment_queue: queue.Queue = queue.Queue()
 
     # コンポーネント初期化
     screen_capture = ScreenCapture(config)
-    ai_analyzer = AIAnalyzer(config)
+    ai_analyzer = AIAnalyzer(config, model, processor)
 
     # 一時停止イベント
     pause_event = threading.Event()
@@ -125,7 +146,11 @@ def main():
     )
     ai_thread.start()
 
-    # GUI
+    # GUI（PyQt5はtorchロード後にimport — DLL競合回避）
+    from PyQt5.QtWidgets import QApplication
+    from overlay.window import OverlayWindow
+    from tray.system_tray import SystemTray
+
     app = QApplication(sys.argv)
     overlay = OverlayWindow(config)
     overlay.comment_queue = comment_queue

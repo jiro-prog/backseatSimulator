@@ -7,11 +7,14 @@ image_max_size: 1280          # リサイズ長辺 (px)
 change_threshold: 0.05        # 差分検知の閾値
 max_skip_count: 4             # 差分なしでもN回に1回は強制キャプチャ
 
-# --- AI ---
-model_name: "gemma4:e2b"
-ollama_url: "http://localhost:11434"
-persona: "shijicyu"              # プロンプトプリセット名
-visual_token_budget: 140      # ビジュアルトークン予算 (70/140/280)
+# --- AI (Transformers) ---
+model_id: "google/gemma-4-E2B-it"   # HuggingFace モデルID
+quantization: "4bit"                 # auto | 4bit | 8bit | none
+device_map: "cuda:0"                 # auto | cpu | cuda:0
+max_new_tokens: 150                  # 生成トークン上限
+persona: "shijicyu"                  # プロンプトプリセット名
+visual_token_budget: 140             # ビジュアルトークン予算 (70/140/280)
+ple_offload: true                    # PLEテーブルをCPUにオフロード (VRAM ~4.5GB削減)
 
 # --- フォーカス ---
 enable_focus: true             # 動的フォーカス機能の有効/無効
