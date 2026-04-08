@@ -1,9 +1,11 @@
 # BackseatSimulator
 ## デスクトップオーバーレイアプリケーション
 
-**アーキテクチャ設計書 v2.4**
+**アーキテクチャ設計書 v2.5**
 プラットフォーム: Windows / Python / Gemma 4
 2026年4月9日
+
+> v2.4 → v2.5: 5秒音声バッファでのASRプロンプト問題を解決（C枠の文字数制限緩和+感想コメント誘導）。audio_towerグリーディ探索完了（conformer全12層bf16必須、output_proj/subsample_convは4bit可能だが-5MiBで見合わず現状維持）。
 
 > v2.3 → v2.4: per-layer感度分析に基づくvision_towerの選択的bf16差し替え（全層289MiB→55MiB、4ブロックで97%品質維持）。`_dequantize_tower`にブロックフィルタ追加。`vision_fp16_blocks`/`audio_fp16_blocks`設定新設。
 
@@ -158,6 +160,8 @@
 | 歌詞聞き取り（日本語） | **部分的に有効** | 空耳レベルだが文脈は拾える（「後ろついて」「切り抜けて」等） |
 | コンテンツ認識 | **有効** | ラジオ番組名・ON AIR等の文脈を音声+画面から統合認識 |
 
+> **注 (v2.5):** audio_towerグリーディ探索の結果、conformer全12層がbf16必須であることを確認。output_proj(-3MiB)とsubsample_conv(-2MiB)は4bit化可能だが合計-5MiBで設定複雑化に見合わないため全層bf16を維持。v2.5でC枠プロンプトを改善し、5秒バッファでの音声反応コメントが安定動作。
+
 > **注 (v2.2):** v2.1時点では4bit量子化下でASR不能だったが、audio_tower bf16差し替えで音声認識品質が劇的改善。完全なASRではないが、楽器・ムード・歌詞断片・コンテンツ文脈の認識が実用レベルに到達。
 
 **graceful fallback:**
@@ -227,8 +231,8 @@ BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化
 
 **設計方針:**
 - ロール: 「ニコニコ動画の視聴者たち（複数人）」として振る舞わせる
-- コメント構成: A節（画面言及、半分以上）+ B節（短いリアクション/応援、残り）
-- 文字数: 15文字以内。短いほどよい
+- コメント構成: A節（画面言及、半分以上）+ B節（短いリアクション/応援、残り）+ C節（音声反応、1個まで、音声有りの時のみ）
+- 文字数: A/B節は15文字以内。C節は30文字以内（ASR能力を活かすため緩和）
 - 生成数: 5〜8個
 - 色: **プロンプトでは指定しない**。analyzer側でランダム割り当て
 - レスポンス形式: `{"comments": [{"text": "コメント"}]}`
@@ -271,7 +275,7 @@ systemプロンプトに以下を動的に追加:
 ```python
 FOCUS_SUFFIX = "2枚目は注目部分のズーム。そこに見えるものに具体的に触れろ。"
 AUDIO_SUFFIX = "音声も聞こえている。会話が聞こえたら内容に反応しろ。"
-AUDIO_SYSTEM_SUFFIX = "\nC. 聞こえた会話への反応（1個まで）:\n   話の内容に反応しろ。ただし画面への反応を減らすな\n   BGMだけ・無音ならこの枠は不要"
+AUDIO_SYSTEM_SUFFIX = "\nC. 聞こえた会話への反応（1個まで、30文字以内）:\n   聞こえた話の内容を踏まえた感想を書け。「〜って言ってるw」「〜は草」のような反応\n   逐語書き起こし禁止。聞こえた内容への短いツッコミや感想にしろ\n   BGMだけ・無音ならこの枠は不要"
 # audio有りの時のみsystemプロンプトに動的注入（analyzer.py）
 
 user_prompt = persona["user"]                          # ベース: "この画面にニコニコ風コメントして。短く、説明なし。"
@@ -603,3 +607,4 @@ BackseatSimulator/
 | v2.1 | 2026/04/07 | vision_tower bf16差し替え（`_dequantize_vision_tower()`、+302MiB、OCR・画面認識の劇的改善）。scene機能の完全廃止（sceneフィールド・SCENE_TRANSITION/CONTINUE_TEMPLATE・_prev_scene・_update_scene・reset_scene・scene TTL関連すべて削除、JSON応答形式を`{"comments":[...]}`に簡素化）。音声ピークノーマライズ追加（`peak/max(abs)`正規化）。オーバーレイ`_raise_topmost`タイマー追加（5秒ごとSetWindowPos HWND_TOPMOST）。デバッグダンプ機能（debug_dump: true→2サイクル目にfull.png/focus.png/audio.wav/prompt.txt保存）。設定値変更: visual_token_budget 140→1120、max_new_tokens 150→120、audio_buffer_seconds 5→10、enable_focus true→false（暫定）、新設 vision_fp16/debug_dump。推論速度 20〜25秒→7〜13秒/サイクル。VRAM運用時 ~4000→~5800 MiB。AUDIO_SUFFIXに「会話の内容が聞き取れたら触れろ。」追加。プロンプト「そのままコピーするな」→「そのまま読み上げるな。内容を踏まえた感想を言え」に変更。音声認識実測: プロソディ検知有効、ASR（音声認識）は4bit量子化下では不能（conformer 12層の精度劣化） |
 | v2.2 | 2026/04/08 | audio_tower bf16差し替え（`_dequantize_tower()`汎用化、134層、+582MiB、音声認識品質の劇的改善）。ピークノーマライズ→RMS正規化に変更（target_rms=0.05、クリッピング歪み解消）。sounddevice→pyaudiowpatchに移行。音声認識実測: 楽器識別・音楽ムード把握・英語歌詞断片・コンテンツ文脈認識が実用レベルに到達。日本語歌詞は空耳レベルだが文脈は拾える。新設 audio_fp16/audio_target_rms。VRAM: ロード時2955 MiB（vision+audio bf16込み） |
 | **v2.3** | **2026/04/08** | **推論高速化: bnb_4bit_compute_dtype=bf16（~20%高速化）、quantized KV cache廃止（quanto 4bitが短コンテキストで逆効果）。音声バッファ10→5秒（音声トークン250→125、コメント数1.8→4.1個に改善）。音声反応スロット: AUDIO_SYSTEM_SUFFIXでC枠（1個まで）をsystemプロンプトに動的注入、画面/音声バランス確保。パイプライン改善: 推論後の滞留フレームスキップ＋低コメント時の動的待機（≤1コメント→+capture_interval秒待機）で短サイクル1コメント連鎖を解消。オーバーレイ: WDA_EXCLUDEFROMCAPTUREで自己コメントのキャプチャ除外。プロンプト: 「5〜8個返せ。5個未満は禁止」追加。transcribeペルソナ（診断用）追加。LogitsProcessorによるEOS抑制は品質劣化で不採用。VRAM: 運用時~6500 MiB** |
+| **v2.5** | **2026/04/09** | **ASRプロンプト問題の解決: 5秒バッファでaudio_tower自体はASR可能だがC枠の15文字制限+JSON形式がASR能力を圧殺していたことを特定。C枠を30文字以内+「聞こえた内容への感想コメント」誘導に変更、逐語書き起こしではなく反応コメント（「〜って言ってるw」等）に誘導しニコニコ風に収まる形で解決。audio_towerグリーディ探索: サブプロセス分離方式で全14ブロックを全bf16→段階的4bit化テスト。output_proj(-3MiB, score=1.00)とsubsample_conv(-2MiB, score=1.00)は4bit化可能だが合計-5MiBで設定複雑化に見合わず現状維持。conformer層は1層でも4bit化すると書き起こし変質、3層で幻覚・反復ループ。結論: audio_fp16=true+blocks指定なし（全層bf16）が最適、量子化削減余地なし** |
