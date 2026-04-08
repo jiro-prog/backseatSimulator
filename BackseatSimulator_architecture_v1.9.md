@@ -1,9 +1,11 @@
 # BackseatSimulator
 ## デスクトップオーバーレイアプリケーション
 
-**アーキテクチャ設計書 v2.3**
+**アーキテクチャ設計書 v2.4**
 プラットフォーム: Windows / Python / Gemma 4
-2026年4月8日
+2026年4月9日
+
+> v2.3 → v2.4: per-layer感度分析に基づくvision_towerの選択的bf16差し替え（全層289MiB→55MiB、4ブロックで97%品質維持）。`_dequantize_tower`にブロックフィルタ追加。`vision_fp16_blocks`/`audio_fp16_blocks`設定新設。
 
 > v2.2 → v2.3: 推論高速化（bnb_4bit_compute_dtype=bf16、quantized KV cache廃止）。音声バッファ10→5秒（音声トークン250→125、コメント数1.8→3.2個に改善）。音声反応スロット（C枠1個まで）追加。滞留フレームスキップ＋動的待機で短サイクル1コメント連鎖を解消（最終平均4.1個）。オーバーレイをWDA_EXCLUDEFROMCAPTUREでキャプチャ除外。
 
@@ -176,14 +178,31 @@
 - ロード時間: 初回30秒〜数分（2回目以降はOSキャッシュで高速化）
 - ロード失敗時はエラーメッセージを表示して終了
 
-**tower bf16差し替え (v2.1 vision, v2.2 audio):**
+**tower bf16差し替え (v2.1 vision, v2.2 audio, v2.4 選択的差し替え):**
 
 BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化してしまい、画像認識・OCR・音声認識が壊滅する問題があった。`llm_int8_skip_modules` は一部のLinear層で効かないため、ロード後に手動差し替えする方式を採用。
 
-- `_dequantize_tower(model, model_id, tower_name)` 関数: 指定tower内の `bnb.nn.Linear4bit` を検出し、safetensorsからオリジナルweightをbf16で差し替え。v2.2でvision専用関数から汎用化
-- vision_tower: 113層、VRAM +302MiB（2071→2373 MiB）。画面テキストOCR・画面内容の正確な認識が可能に
-- audio_tower: 134層、VRAM +582MiB（2373→2955 MiB）。楽器識別・歌詞聞き取り・音楽ムード把握が可能に
-- config.yaml: `vision_fp16: true` / `audio_fp16: true` で個別に有効化
+- `_dequantize_tower(model, model_id, tower_name, blocks=None)` 関数: 指定tower内の `bnb.nn.Linear4bit` を検出し、safetensorsからオリジナルweightをbf16で差し替え。v2.2で汎用化、v2.4で `blocks` パラメータ追加（encoder layer単位の選択的差し替え）
+- `_get_block_key(module_name, tower_name)` 関数: モジュール名からブロックキー（patch_embedder, encoder.layers.N, layers.N, output_proj等）を抽出
+- vision_tower: 113層（16 encoder layers × 7 modules + patch_embedder）。選択的bf16で4ブロック22層のみ差し替え（+55MiB）、全層比cos_sim 0.997以上を維持。全層差し替え時は+302MiB
+- audio_tower: 134層（12 conformer layers × 11 modules + subsample_conv + output_proj）。全層bf16が必要（+582MiB）。conformer層の量子化感度が高く選択的削減は要グリーディ探索
+- config.yaml: `vision_fp16: true` / `audio_fp16: true` で有効化。`vision_fp16_blocks` / `audio_fp16_blocks` でブロック指定（null=全層）
+
+**v2.4 per-layer感度分析の結果:**
+
+| vision_tower | cos_sim | 判定 |
+|---|---|---|
+| patch_embedder | 0.485 | bf16必須（入力空間の量子化誤差が全層に伝播） |
+| encoder.layers.15 | 0.987 | bf16推奨（最終層） |
+| encoder.layers.0, 5 | 0.993-0.994 | bf16推奨 |
+| encoder.layers.1-4, 6-14 | 0.995-0.998 | 4bitで十分 |
+
+| audio_tower | cos_sim | 判定 |
+|---|---|---|
+| layers.0 | 0.491 | bf16必須 |
+| layers.1-5 | 0.67-0.89 | bf16推奨 |
+| layers.6-11 | 0.81-0.96 | 個別では許容だが累積で劣化 |
+| subsample_conv, output_proj | 0.986-0.994 | 4bit可（畳み込みは量子化ロバスト） |
 
 #### 推論パイプライン
 
@@ -461,7 +480,9 @@ config.yaml でカスタマイズ可能:
 | `audio_highpass` | 150 | int (Hz) | HPフィルタ周波数。0で無効（v2.2新設） |
 | `audio_lowpass` | 11000 | int (Hz) | LPフィルタ周波数。ナイキスト超過時は自動無効（v2.2新設） |
 | `vision_fp16` | true | bool | vision_tower bf16差し替えの有効/無効（v2.1新設） |
+| `vision_fp16_blocks` | (list) | list/null | bf16差し替え対象ブロック。null=全層（v2.4新設） |
 | `audio_fp16` | true | bool | audio_tower bf16差し替えの有効/無効（v2.2新設。+~582MiB VRAM） |
+| `audio_fp16_blocks` | null | list/null | bf16差し替え対象ブロック。null=全層（v2.4新設） |
 | `debug_dump` | true | bool | デバッグダンプの有効/無効（v2.1新設。2サイクル目にdebug_dump/へ保存） |
 | `font_size` | 36 | int | コメントのフォントサイズ |
 | `scroll_speed` | 3.0 | float | コメントの流れる速度 (px/frame) |
@@ -525,20 +546,28 @@ BackseatSimulator/
 | E2B | 約6GB | 約3.5GB | 約3.8GB (+302MiB) | **約4.4GB (+884MiB)** | RTX 3060 Ti 8GBで動作 |
 | E4B | 約10GB | 約5GB | — | — | 12GB VRAM推奨 |
 
-**v2.3 実測値 (E2B 4bit + vision&audio bf16, budget=1120):**
+**v2.4 実測値 (E2B 4bit + 選択的vision bf16 + audio全層bf16, budget=1120):**
+
+| 状態 | VRAM | 備考 |
+|------|------|------|
+| モデルロード後（量子化のみ） | ~2071 MiB | |
+| + vision_tower 選択的bf16 (4ブロック) | ~2127 MiB (+55) | v2.4: 全層+302から81%削減 |
+| + audio_tower 全層bf16 | ~2709 MiB (+582) | |
+| 推論運用時 | ~6000 MiB（v2.4実測） | v2.3比 -500MiB |
+| VRAM余裕 (8.2GB中) | ~2.2 GB | |
+
+**参考: v2.3 全層bf16時:**
 
 | 状態 | VRAM |
 |------|------|
-| モデルロード後（量子化のみ） | ~2071 MiB |
-| + vision_tower bf16 | ~2373 MiB (+302) |
-| + audio_tower bf16 | ~2955 MiB (+582) |
-| 推論運用時 | ~6500 MiB（v2.3実測） |
-| VRAM余裕 (8.2GB中) | ~1.7 GB |
+| + vision_tower 全層bf16 | ~2373 MiB (+302) |
+| + audio_tower 全層bf16 | ~2955 MiB (+582) |
+| 推論運用時 | ~6500 MiB |
 
 - モデルは起動時に1回ロード、プロセス終了まで保持
 - 推論ごとの `torch.cuda.empty_cache()` は不要（逆に遅くなる）
 - `torch.inference_mode()` で推論時のメモリ効率を最適化
-- tower bf16差し替えの合計VRAMコストは+884MiBで8GB GPUに十分収まる
+- vision_towerの選択的bf16: patch_embedder + encoder.layers.0/5/15 の4ブロック（22/113層）で全層比cos_sim 0.997以上。感度分析スクリプト `scripts/sensitivity_analysis.py` で測定
 - audio_fp32昇格は実験の結果bf16と有意差なしのため不採用（v2.3で検証済み）
 
 ---

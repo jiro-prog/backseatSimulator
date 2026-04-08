@@ -83,9 +83,11 @@ def load_model(config: dict) -> tuple:
         _setup_ple_cpu_lookup(model)
 
     if config.get("vision_fp16", False):
-        _dequantize_tower(model, model_id, "vision_tower")
+        _dequantize_tower(model, model_id, "vision_tower",
+                          blocks=config.get("vision_fp16_blocks"))
     if config.get("audio_fp16", False):
-        _dequantize_tower(model, model_id, "audio_tower")
+        _dequantize_tower(model, model_id, "audio_tower",
+                          blocks=config.get("audio_fp16_blocks"))
 
     logger.info("モデルロード完了 (VRAM allocated=%.0f MiB, reserved=%.0f MiB)",
                 torch.cuda.memory_allocated() / 1024**2,
@@ -93,8 +95,28 @@ def load_model(config: dict) -> tuple:
     return model, processor
 
 
-def _dequantize_tower(model, model_id: str, tower_name: str):
-    """指定tower内の量子化Linear層をbf16で再ロードして差し替える。"""
+def _get_block_key(module_name: str, tower_name: str) -> str:
+    """モジュール名からブロックキー（encoder layer単位）を抽出する。"""
+    if "vision_tower" in tower_name:
+        if "patch_embedder" in module_name:
+            return "patch_embedder"
+        m = re.search(r"encoder\.layers\.(\d+)\.", module_name)
+        return f"encoder.layers.{m.group(1)}" if m else "other"
+    else:  # audio_tower
+        if "subsample_conv_projection" in module_name:
+            return "subsample_conv_projection"
+        if module_name.endswith("output_proj"):
+            return "output_proj"
+        m = re.search(r"layers\.(\d+)\.", module_name)
+        return f"layers.{m.group(1)}" if m else "other"
+
+
+def _dequantize_tower(model, model_id: str, tower_name: str,
+                      blocks: list[str] | None = None):
+    """指定tower内の量子化Linear層をbf16で再ロードして差し替える。
+
+    blocks: Noneなら全層（従来動作）、リストなら指定ブロックのみ差し替え。
+    """
     import bitsandbytes as bnb
     from safetensors import safe_open
     from huggingface_hub import snapshot_download
@@ -104,12 +126,23 @@ def _dequantize_tower(model, model_id: str, tower_name: str):
     import glob as glob_mod
     st_files = glob_mod.glob(os.path.join(model_path, "*.safetensors"))
 
+    block_set = set(blocks) if blocks else None
+
     # 量子化されたLinear層を特定
     quantized_modules = {}
+    skipped = 0
     for name, module in model.named_modules():
         if tower_name in name and isinstance(module, bnb.nn.Linear4bit):
+            if block_set is not None:
+                if _get_block_key(name, tower_name) not in block_set:
+                    skipped += 1
+                    continue
             quantized_modules[name] = module
-    logger.info("%s内の量子化Linear層: %d個", tower_name, len(quantized_modules))
+    if block_set is not None:
+        logger.info("%s: 対象 %d個 (スキップ %d個, blocks=%s)",
+                    tower_name, len(quantized_modules), skipped, sorted(block_set))
+    else:
+        logger.info("%s内の量子化Linear層: %d個", tower_name, len(quantized_modules))
 
     if not quantized_modules:
         logger.info("%s: 量子化Linear層なし、スキップ", tower_name)
