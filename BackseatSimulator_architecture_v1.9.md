@@ -117,9 +117,21 @@
 - `get_audio()` 呼び出し時（8秒に1回）にstereo→mono + scipy.signal.resample_poly(48k→16k)
 - リサンプルが3:1整数比のため高効率
 
-**RMS正規化 (v2.2):**
+**音声前処理パイプライン (v2.2):**
+
+`get_audio()` 内でリサンプル後に以下の順で適用:
+
+1. **DCオフセット除去** — `raw - np.mean(raw)`
+2. **プリエンファシス** — α=0.5（`audio_preemphasis`）。高周波のSNR改善。α=0.97は攻めすぎ（「うるさい」連発）で0.5に調整
+3. **HPフィルタ 150Hz** — Butterworth 4th order（`audio_highpass`）。ランブル・低周波ノイズ除去
+4. **LPフィルタ** — `audio_lowpass=11000`だが16kHzサンプリングのナイキスト(8kHz)超過で自動無効化。resample_polyのLPFで十分
+5. **RMS正規化** — target_rms=0.05（`audio_target_rms`）。loopbackの低音量補正
+
+フィルタ係数はscipy.signal.butter/sosfiltで実装。係数は`__init__`で事前計算。VRAMインパクト: ゼロ（CPU上のnumpy/scipy処理）。
+
+**RMS正規化の詳細 (v2.2):**
 - WASAPI loopbackのキャプチャ音量はユーザの聴感より大幅に低い（RMS=0.003〜0.015程度）
-- リサンプル後に目標RMS（default 0.05）に正規化。`[-1, 1]` クリップで安全性確保
+- 正規化後に`[-1, 1]`クリップで安全性確保
 - v2.1のピークノーマライズ（`peak/max(abs)`→1.0）はピーク張り付き（Peak=1.0 dBFS）によるクリッピング歪みが発生し、モデルが「ノイズ」と誤認する原因だったため廃止
 - target_rms=0.05でPeak≈0.27（-11.4 dBFS）、クリッピングサンプル数ゼロを確認
 
@@ -206,8 +218,9 @@ BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化
 
 | キー | 名称 | 特徴 | 差別化要素 |
 |------|------|------|-----------|
-| **shijicyu** | 視聴者 | ニコニコ動画の視聴者。ツッコミ+リアクション | B節: リアクション辞書（草、それな、は？等18種） |
+| **shijicyu** | 視聴者 | ニコニコ動画の視聴者。ツッコミ+リアクション。A/B/C枠（音声時） | B節: リアクション辞書（草、それな、は？等18種） |
 | **home** | 応援 | ポジティブ限定の視聴者。画面内容に触れつつ肯定的 | B節: 応援辞書（えらい、すごい、天才か？等18種）+ ネガティブ禁止 |
+| **transcribe** | 音声書き起こし（診断用） | 音声の聞き取り内容を文字起こし。画面は無視。v2.3で追加 | 文字数制限なし。1発話=1コメント。音声認識能力の検証用 |
 
 **ペルソナ設計の原則:**
 - A節はshijicyu/homeで同じ粒度（「画面に見えるものに具体的に触れるコメント」）
@@ -239,7 +252,8 @@ systemプロンプトに以下を動的に追加:
 ```python
 FOCUS_SUFFIX = "2枚目は注目部分のズーム。そこに見えるものに具体的に触れろ。"
 AUDIO_SUFFIX = "音声も聞こえている。会話が聞こえたら内容に反応しろ。"
-AUDIO_SYSTEM_SUFFIX = "C. 聞こえた会話への反応（1個まで）..."  # systemプロンプトに動的注入
+AUDIO_SYSTEM_SUFFIX = "\nC. 聞こえた会話への反応（1個まで）:\n   話の内容に反応しろ。ただし画面への反応を減らすな\n   BGMだけ・無音ならこの枠は不要"
+# audio有りの時のみsystemプロンプトに動的注入（analyzer.py）
 
 user_prompt = persona["user"]                          # ベース: "この画面にニコニコ風コメントして。短く、説明なし。"
 if pil_focus:  user_prompt += FOCUS_SUFFIX             # + focus
@@ -359,6 +373,11 @@ Ollama の `format: "json"` がなくなったことへの対応:
 - `SWP_NOACTIVATE` フラグでフォーカスを奪わない
 - 他のアプリが最前面を奪った場合でもオーバーレイが自動復帰
 
+**キャプチャ除外 (v2.3):**
+- `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` でスクリーンキャプチャAPIから除外
+- 画面上では通常通り表示されるが、mss等のキャプチャにはオーバーレイが映らない
+- モデルが自分の生成したコメントに反応して品質低下する問題を防止
+
 **アニメーションロジック:**
 
 - QTimerで 16ms間隔（約60fps）で描画更新
@@ -403,7 +422,7 @@ pending残量ベースの動的間隔制御:
 |----------|--------|------|
 | Main Thread | GUI (PyQt5) | PyQt5イベントループ。オーバーレイ描画とシステムトレイ。QTimerでcomment_queueをポーリング+ドリップ制御。 |
 | Capture Thread | daemon | capture_interval秒ごとにキャプチャ。グリッド差分検知+フォーカスクロップ+ウィンドウタイトル取得。image_queueにput()。 |
-| AI Thread | daemon | image_queueからget()。音声スナップショット取得。ウィンドウタイトル注入+コメント生成+フィルター+色付与。comment_queueにput()。 |
+| AI Thread | daemon | image_queueからget()。音声スナップショット取得。ウィンドウタイトル注入+コメント生成+フィルター+色付与。comment_queueにput()。推論後に滞留フレームをスキップ。コメント≤1個の場合はcapture_interval分追加待機（v2.3）。 |
 | Audio Thread (v1.9+) | daemon | enable_audio: true時のみ起動。pyaudiowpatchでWASAPI loopback音声を循環バッファに常時記録。AI Threadがget_audio()で読み出し。 |
 
 > PyQt5のGUI操作は必ずMain Threadで行うこと。Queueを介した間接通信のみを使用。
@@ -427,19 +446,23 @@ config.yaml でカスタマイズ可能:
 | `device_map` | auto | str | auto / cpu / cuda:0 |
 | `max_new_tokens` | 120 | int | 生成トークン上限（v2.1: scene廃止で256→120に削減） |
 | `visual_token_budget` | 1120 | int | ビジュアルトークン予算（v2.1: vision bf16で高解像度が活きるため140→1120） |
-| `persona` | shijicyu | str | ペルソナ名（shijicyu / home） |
+| `persona` | shijicyu | str | ペルソナ名（shijicyu / home / transcribe） |
+| `ple_offload` | true | bool | PLEテーブルをCPUにオフロード（VRAM ~4.5GB削減）（v1.9新設） |
 | `enable_focus` | false | bool | 動的フォーカス機能の有効/無効（v2.1: budget増でフォーカスクロップの効果が薄れたため暫定false） |
 | `focus_grid` | [3, 3] | list | グリッド分割 [rows, cols] |
 | `focus_diff_threshold` | 0.05 | float | フォーカス対象とするdiff閾値 |
 | `focus_crop_size` | 640 | int (px) | クロップ画像の長辺 |
-| `enable_audio` | false | bool | デスクトップ音声キャプチャの有効/無効 |
+| `enable_audio` | true | bool | デスクトップ音声キャプチャの有効/無効（v2.3でデフォルトtrue化） |
 | `audio_buffer_seconds` | 5 | int (sec) | 音声ローリングバッファ長（v2.3: 10→5秒に短縮。音声トークン削減でコメント数改善） |
 | `audio_device` | null | str/int | 音声デバイス（null=デフォルト出力のloopback自動検出） |
 | `audio_silence_threshold` | 0.001 | float | 無音判定RMS閾値 |
 | `audio_target_rms` | 0.05 | float | RMS正規化の目標レベル。0で無効（v2.2新設） |
+| `audio_preemphasis` | 0.5 | float | プリエンファシス係数。0で無効（v2.2新設） |
+| `audio_highpass` | 150 | int (Hz) | HPフィルタ周波数。0で無効（v2.2新設） |
+| `audio_lowpass` | 11000 | int (Hz) | LPフィルタ周波数。ナイキスト超過時は自動無効（v2.2新設） |
 | `vision_fp16` | true | bool | vision_tower bf16差し替えの有効/無効（v2.1新設） |
 | `audio_fp16` | true | bool | audio_tower bf16差し替えの有効/無効（v2.2新設。+~582MiB VRAM） |
-| `debug_dump` | false | bool | デバッグダンプの有効/無効（v2.1新設。2サイクル目にdebug_dump/へ保存） |
+| `debug_dump` | true | bool | デバッグダンプの有効/無効（v2.1新設。2サイクル目にdebug_dump/へ保存） |
 | `font_size` | 36 | int | コメントのフォントサイズ |
 | `scroll_speed` | 3.0 | float | コメントの流れる速度 (px/frame) |
 | `max_comments` | 20 | int | 同時表示コメント数の上限 |
@@ -509,8 +532,8 @@ BackseatSimulator/
 | モデルロード後（量子化のみ） | ~2071 MiB |
 | + vision_tower bf16 | ~2373 MiB (+302) |
 | + audio_tower bf16 | ~2955 MiB (+582) |
-| 推論運用時 | ~5800 MiB |
-| VRAM余裕 (8.2GB中) | ~2.3 GB |
+| 推論運用時 | ~6500 MiB（v2.3実測） |
+| VRAM余裕 (8.2GB中) | ~1.7 GB |
 
 - モデルは起動時に1回ロード、プロセス終了まで保持
 - 推論ごとの `torch.cuda.empty_cache()` は不要（逆に遅くなる）
