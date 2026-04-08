@@ -12,11 +12,12 @@ model_id: "google/gemma-4-E2B-it"   # HuggingFace モデルID
 quantization: "4bit"                 # auto | 4bit | 8bit | none
 device_map: "cuda:0"                 # auto | cpu | cuda:0
 max_new_tokens: 120                  # 生成トークン上限
-persona: "shijicyu"                  # プロンプトプリセット名
+persona: "shijicyu"                    # プロンプトプリセット名
 visual_token_budget: 1120            # ビジュアルトークン予算 (70/140/280/560/1120)
 ple_offload: true                    # PLEテーブルをCPUにオフロード (VRAM ~4.5GB削減)
-vision_fp16: true                    # vision_towerを4bit量子化から除外しfp16で保持
-debug_dump: false                    # 次の1サイクルの入力データをdebug_dump/に保存
+vision_fp16: true                    # vision_towerを4bit量子化から除外しbf16で保持
+audio_fp16: true                     # audio_towerを4bit量子化から除外しbf16で保持 (+~512MiB VRAM)
+debug_dump: true                     # 次の1サイクルの入力データをdebug_dump/に保存
 
 # --- フォーカス ---
 enable_focus: false            # 動的フォーカス機能の有効/無効
@@ -26,9 +27,13 @@ focus_crop_size: 640           # クロップ画像の長辺 (px)
 
 # --- 音声 ---
 enable_audio: true              # デスクトップ音声キャプチャの有効/無効
-audio_buffer_seconds: 10         # ローリングバッファ長（秒）
+audio_buffer_seconds: 5          # ローリングバッファ長（秒）
 audio_device: null               # 音声デバイス（null = デフォルト出力のloopback自動検出）
 audio_silence_threshold: 0.001   # 無音判定RMS閾値
+audio_target_rms: 0.05           # RMS正規化の目標レベル (0で無効)
+audio_preemphasis: 0.5           # プリエンファシス係数 (0で無効)
+audio_highpass: 150              # ハイパスフィルタ周波数 Hz (0で無効)
+audio_lowpass: 11000             # ローパスフィルタ周波数 Hz (0で無効)
 
 # --- オーバーレイ ---
 font_size: 36

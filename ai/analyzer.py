@@ -13,8 +13,8 @@ import torch
 from PIL import Image
 from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
-from ai.prompts import (AUDIO_SUFFIX, FOCUS_SUFFIX, PERSONAS,
-                        WINDOW_TITLE_TEMPLATE)
+from ai.prompts import (AUDIO_SUFFIX, AUDIO_SYSTEM_SUFFIX, FOCUS_SUFFIX,
+                        PERSONAS, WINDOW_TITLE_TEMPLATE)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def load_model(config: dict) -> tuple:
         kwargs["device_map"] = config.get("device_map", "auto")
 
     if quantization == "4bit":
-        bnb_kwargs = {"load_in_4bit": True}
+        bnb_kwargs = {"load_in_4bit": True, "bnb_4bit_compute_dtype": torch.bfloat16}
         if ple_offload:
             bnb_kwargs["llm_int8_enable_fp32_cpu_offload"] = True
         kwargs["quantization_config"] = BitsAndBytesConfig(**bnb_kwargs)
@@ -83,7 +83,9 @@ def load_model(config: dict) -> tuple:
         _setup_ple_cpu_lookup(model)
 
     if config.get("vision_fp16", False):
-        _dequantize_vision_tower(model, model_id)
+        _dequantize_tower(model, model_id, "vision_tower")
+    if config.get("audio_fp16", False):
+        _dequantize_tower(model, model_id, "audio_tower")
 
     logger.info("モデルロード完了 (VRAM allocated=%.0f MiB, reserved=%.0f MiB)",
                 torch.cuda.memory_allocated() / 1024**2,
@@ -91,35 +93,34 @@ def load_model(config: dict) -> tuple:
     return model, processor
 
 
-def _dequantize_vision_tower(model, model_id: str):
-    """vision_tower内の量子化Linear層をfp16で再ロードして差し替える。"""
+def _dequantize_tower(model, model_id: str, tower_name: str):
+    """指定tower内の量子化Linear層をbf16で再ロードして差し替える。"""
     import bitsandbytes as bnb
     from safetensors import safe_open
     from huggingface_hub import snapshot_download
 
     model_path = snapshot_download(model_id, local_files_only=True)
 
-    # safetensorsからvision_tower関連のweightを読み込み
     import glob as glob_mod
     st_files = glob_mod.glob(os.path.join(model_path, "*.safetensors"))
 
     # 量子化されたLinear層を特定
     quantized_modules = {}
     for name, module in model.named_modules():
-        if "vision_tower" in name and isinstance(module, bnb.nn.Linear4bit):
+        if tower_name in name and isinstance(module, bnb.nn.Linear4bit):
             quantized_modules[name] = module
-    logger.info("vision_tower内の量子化Linear層: %d個", len(quantized_modules))
+    logger.info("%s内の量子化Linear層: %d個", tower_name, len(quantized_modules))
 
     if not quantized_modules:
-        logger.info("量子化Linear層なし、スキップ")
+        logger.info("%s: 量子化Linear層なし、スキップ", tower_name)
         return
 
-    # safetensorsから元のweightを読み込んでマッピング
+    # safetensorsから元のweightを読み込み
     original_weights = {}
     for st_file in st_files:
         with safe_open(st_file, framework="pt", device="cpu") as f:
             for key in f.keys():
-                if "vision_tower" in key:
+                if tower_name in key:
                     original_weights[key] = f.get_tensor(key)
 
     # 量子化Linear層をtorch.nn.Linearに差し替え
@@ -155,15 +156,16 @@ def _dequantize_vision_tower(model, model_id: str):
         setattr(parent, parts[-1], new_linear)
         replaced += 1
 
-    logger.info("vision_tower: %d/%d Linear層をbf16に差し替え完了", replaced, len(quantized_modules))
+    logger.info("%s: %d/%d Linear層をbf16に差し替え完了", tower_name, replaced, len(quantized_modules))
 
     # 検証
-    vt_dtypes = set()
+    dtypes = set()
     for name, param in model.named_parameters():
-        if "vision_tower" in name:
-            vt_dtypes.add(str(param.dtype))
-    logger.info("vision_tower dtypes (差し替え後): %s", vt_dtypes)
-    logger.info("VRAM after vision_fp16: %.0f MiB", torch.cuda.memory_allocated() / 1024**2)
+        if tower_name in name:
+            dtypes.add(str(param.dtype))
+    logger.info("%s dtypes (差し替え後): %s", tower_name, dtypes)
+    logger.info("VRAM after %s dequant: %.0f MiB", tower_name, torch.cuda.memory_allocated() / 1024**2)
+
 
 
 def _setup_ple_cpu_lookup(model):
@@ -218,6 +220,8 @@ class AIAnalyzer:
 
         # コンテクスト注入
         system_prompt = persona["system"]
+        if audio_data is not None:
+            system_prompt += AUDIO_SYSTEM_SUFFIX
         if window_title:
             system_prompt += WINDOW_TITLE_TEMPLATE.format(window_title=window_title)
 
@@ -264,8 +268,6 @@ class AIAnalyzer:
                     temperature=1.0,
                     top_p=0.95,
                     top_k=64,
-                    cache_implementation="quantized",
-                    cache_config={"backend": "quanto", "nbits": 4},
                 )
 
             response_text = self.processor.batch_decode(

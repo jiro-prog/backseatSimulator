@@ -68,6 +68,9 @@ class OverlayWindow(QWidget):
         self._topmost_timer.timeout.connect(self._raise_topmost)
         self._topmost_timer.start(5000)
 
+        # キャプチャ除外（自分のコメントがスクリーンショットに映らないようにする）
+        self._exclude_from_capture()
+
         # 起動時の挨拶コメント
         greeting = [
             {"text": "わこつ", "color": "#FFFFFF"},
@@ -163,6 +166,17 @@ class OverlayWindow(QWidget):
             painter.drawText(x, y, comment.text)
 
         painter.end()
+
+    def _exclude_from_capture(self):
+        """WDA_EXCLUDEFROMCAPTURE でスクリーンキャプチャから除外する。"""
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            WDA_EXCLUDEFROMCAPTURE = 0x00000011
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+            logger.info("オーバーレイをキャプチャ除外に設定")
+        except Exception:
+            logger.warning("キャプチャ除外設定に失敗")
 
     def _raise_topmost(self):
         """Win32 APIで直接最前面に設定する。"""

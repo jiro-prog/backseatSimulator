@@ -4,7 +4,7 @@ import threading
 
 import numpy as np
 import pyaudiowpatch as pyaudio
-from scipy.signal import resample_poly
+from scipy.signal import butter, resample_poly, sosfilt
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,8 @@ class AudioCapture:
     def __init__(self, config: dict):
         self._buffer_seconds = config.get("audio_buffer_seconds", _DEFAULT_BUFFER_SECONDS)
         self._silence_threshold = config.get("audio_silence_threshold", _DEFAULT_SILENCE_THRESHOLD)
+        self._target_rms = config.get("audio_target_rms", 0.0)
+        self._preemphasis = config.get("audio_preemphasis", 0.0)
 
         self._pa = pyaudio.PyAudio()
 
@@ -48,9 +50,33 @@ class AudioCapture:
         self._up = _TARGET_SR // g
         self._down = self._native_sr // g
 
-        logger.info("AudioCapture初期化: device=%s, sr=%d, ch=%d, buffer=%ds, resample=%d:%d",
+        # EQフィルタ係数の事前計算（16kHz基準）
+        nyquist = _TARGET_SR / 2
+        self._highpass_freq = config.get("audio_highpass", 0)
+        self._lowpass_freq = config.get("audio_lowpass", 0)
+        self._sos_hp = None
+        self._sos_lp = None
+        if 0 < self._highpass_freq < nyquist:
+            self._sos_hp = butter(4, self._highpass_freq, btype='high',
+                                  fs=_TARGET_SR, output='sos')
+        elif self._highpass_freq >= nyquist:
+            logger.warning("audio_highpass=%dHz >= ナイキスト%dHz、無効化",
+                           self._highpass_freq, nyquist)
+            self._highpass_freq = 0
+        if 0 < self._lowpass_freq < nyquist:
+            self._sos_lp = butter(4, self._lowpass_freq, btype='low',
+                                  fs=_TARGET_SR, output='sos')
+        elif self._lowpass_freq >= nyquist:
+            logger.info("audio_lowpass=%dHz >= ナイキスト%dHz、リサンプルLPFで十分なため無効化",
+                        self._lowpass_freq, nyquist)
+            self._lowpass_freq = 0
+
+        logger.info("AudioCapture初期化: device=%s, sr=%d, ch=%d, buffer=%ds, resample=%d:%d, "
+                     "preemph=%.2f, HP=%sHz, LP=%sHz",
                      self._device_info["name"], self._native_sr, self._channels,
-                     self._buffer_seconds, self._up, self._down)
+                     self._buffer_seconds, self._up, self._down,
+                     self._preemphasis,
+                     self._highpass_freq or "off", self._lowpass_freq or "off")
 
     def _find_loopback_device(self, device_cfg) -> dict:
         """WASAPI loopbackデバイスを検出する。"""
@@ -168,9 +194,24 @@ class AudioCapture:
         if self._native_sr != _TARGET_SR:
             raw = resample_poly(raw, self._up, self._down).astype(np.float32)
 
-        # ピークノーマライズ（音量を最大化してモデルの認識精度を上げる）
-        peak = np.max(np.abs(raw))
-        if peak > 1e-6:
-            raw = raw / peak
+        # DCオフセット除去
+        raw = (raw - np.mean(raw)).astype(np.float32)
+
+        # プリエンファシス（高周波のSNR改善）
+        if self._preemphasis > 0:
+            raw = np.append(raw[0], raw[1:] - self._preemphasis * raw[:-1]).astype(np.float32)
+
+        # EQフィルタ（ランブル除去 + 高域ノイズ除去）
+        if self._sos_hp is not None:
+            raw = sosfilt(self._sos_hp, raw).astype(np.float32)
+        if self._sos_lp is not None:
+            raw = sosfilt(self._sos_lp, raw).astype(np.float32)
+
+        # RMS正規化（loopbackの低音量を補正）
+        if self._target_rms > 0:
+            current_rms = float(np.sqrt(np.mean(raw ** 2)))
+            if current_rms > 1e-6:
+                gain = self._target_rms / current_rms
+                raw = np.clip(raw * gain, -1.0, 1.0).astype(np.float32)
 
         return raw

@@ -1,11 +1,11 @@
 # BackseatSimulator
 ## デスクトップオーバーレイアプリケーション
 
-**アーキテクチャ設計書 v2.1**
+**アーキテクチャ設計書 v2.3**
 プラットフォーム: Windows / Python / Gemma 4
-2026年4月7日
+2026年4月8日
 
-> v1.9 → v2.1: vision_tower bf16差し替えで画像認識・OCR精度を劇的改善。scene機能を完全廃止（JSON応答・プロンプト・内部状態すべて）。音声ピークノーマライズ追加。オーバーレイ最前面維持のWin32タイマー追加。デバッグダンプ機能追加。推論速度 20〜25秒→7〜13秒/サイクル。
+> v2.2 → v2.3: 推論高速化（bnb_4bit_compute_dtype=bf16、quantized KV cache廃止）。音声バッファ10→5秒（音声トークン250→125、コメント数1.8→3.2個に改善）。音声反応スロット（C枠1個まで）追加。滞留フレームスキップ＋動的待機で短サイクル1コメント連鎖を解消（最終平均4.1個）。オーバーレイをWDA_EXCLUDEFROMCAPTUREでキャプチャ除外。
 
 ---
 
@@ -55,9 +55,9 @@
    ウィンドウタイトル                                                              _raise_topmost(5秒)
 
 [Audio Capture]  ── get_audio() ──>  (AI Analyzerが画像取得時に音声スナップショットも取得)
-  (sounddevice        循環バッファ
+  (pyaudiowpatch      循環バッファ
    WASAPI loopback)   16kHz mono変換
-                      ピークノーマライズ
+                      RMS正規化
 ```
 
 ### 2.2 データフロー
@@ -103,37 +103,48 @@
 
 ### 3.2 Audio Captureモジュール (v1.9+)
 
-**ライブラリ:** sounddevice + scipy
+**ライブラリ:** pyaudiowpatch + scipy（v2.2でsounddevice→pyaudiowpatchに移行）
 
 デスクトップ音声（ユーザに聞こえている音）をキャプチャし、Gemma 4 E2Bのネイティブ音声エンコーダに直接渡す。別途STTモデルは不要。
 
 **キャプチャ方式:**
-- sounddevice + WASAPI loopback（デフォルト出力デバイスをloopback入力として使用）
-- `sd.WasapiSettings(exclusive=False)` で非排他モード
-- コールバック内は生データコピーのみ（高優先度オーディオスレッドを阻害しない）
+- pyaudiowpatch + WASAPI loopback（デフォルト出力デバイスをloopback入力として自動検出）
+- `get_loopback_device_info_generator()` でloopbackデバイスを列挙し、デフォルト出力に対応するものを選択
+- 専用読み取りスレッドでstreamからchunk単位で読み取り、循環バッファに書き込み
 
 **循環バッファ:**
 - ネイティブレート（通常48kHz stereo）で保持。pre-allocated numpy array + write_pos + Lock
 - `get_audio()` 呼び出し時（8秒に1回）にstereo→mono + scipy.signal.resample_poly(48k→16k)
 - リサンプルが3:1整数比のため高効率
-- **ピークノーマライズ (v2.1):** リサンプル後に `peak / max(abs)` で正規化。WASAPI loopbackの音量がフルスケールの3%未満だった問題を解決。`[-1, 1]` クリップで安全性確保
+
+**RMS正規化 (v2.2):**
+- WASAPI loopbackのキャプチャ音量はユーザの聴感より大幅に低い（RMS=0.003〜0.015程度）
+- リサンプル後に目標RMS（default 0.05）に正規化。`[-1, 1]` クリップで安全性確保
+- v2.1のピークノーマライズ（`peak/max(abs)`→1.0）はピーク張り付き（Peak=1.0 dBFS）によるクリッピング歪みが発生し、モデルが「ノイズ」と誤認する原因だったため廃止
+- target_rms=0.05でPeak≈0.27（-11.4 dBFS）、クリッピングサンプル数ゼロを確認
 
 **無音判定:**
 - `get_audio()` 内でRMS計算。閾値（default 0.001）以下ならNone返却
 - 無音時は音声トークン分の推論コストを節約
 
 **Gemma 4 音声仕様:**
-- 入力: 1D numpy float32、[-1,1]正規化、16kHz
-- トークンレート: 40ms/token（10秒→250トークン）
+- 入力: 1D numpy float32、16kHz
+- feature_extractor: 128-bin MEL spectrogram（20msフレーム、10msホップ）
+- トークンレート: 40ms/token（5秒→125トークン、v2.3で10→5秒に短縮）
 - 上限: 30秒（750トークン）
 - `{"type": "audio", "audio": numpy_array}` でchat templateに渡す
 
-**音声認識の実測結果 (v2.1):**
+**音声認識の実測結果 (v2.2):**
 
 | 機能 | 状態 | 備考 |
 |------|------|------|
-| プロソディ検知（エネルギー・ピッチ・テンポ） | 有効 | 音楽のテンポ変化やエネルギーの変動に反応可能 |
-| ASR（音声認識・会話内容理解） | 不能（4bit量子化下） | conformer 12層の4bit量子化で音素弁別精度が失われている |
+| 楽器識別 | **有効** | ギター・ベース・ドラムを聞き分けてコメント生成 |
+| 音楽ムード把握 | **有効** | テンポ変化・エネルギー変動に反応（「ライブ熱い」「テンション上がる」等） |
+| 歌詞聞き取り（英語） | **部分的に有効** | 英語歌詞の断片を拾える（"NO REASON WHY I'M ONLY DOING..."等） |
+| 歌詞聞き取り（日本語） | **部分的に有効** | 空耳レベルだが文脈は拾える（「後ろついて」「切り抜けて」等） |
+| コンテンツ認識 | **有効** | ラジオ番組名・ON AIR等の文脈を音声+画面から統合認識 |
+
+> **注 (v2.2):** v2.1時点では4bit量子化下でASR不能だったが、audio_tower bf16差し替えで音声認識品質が劇的改善。完全なASRではないが、楽器・ムード・歌詞断片・コンテンツ文脈の認識が実用レベルに到達。
 
 **graceful fallback:**
 - `enable_audio: false`（デフォルト）の場合は一切ロードしない
@@ -153,14 +164,14 @@
 - ロード時間: 初回30秒〜数分（2回目以降はOSキャッシュで高速化）
 - ロード失敗時はエラーメッセージを表示して終了
 
-**vision_tower bf16差し替え (v2.1):**
+**tower bf16差し替え (v2.1 vision, v2.2 audio):**
 
-BitsAndBytes 4bit量子化はvision_tower内の113 Linear層も量子化してしまい、画像認識・OCRが壊滅する問題があった。`llm_int8_skip_modules` は一部のLinear層で効かなかった（audio_towerと同じ問題）ため、ロード後に手動差し替えする方式を採用。
+BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化してしまい、画像認識・OCR・音声認識が壊滅する問題があった。`llm_int8_skip_modules` は一部のLinear層で効かないため、ロード後に手動差し替えする方式を採用。
 
-- `_dequantize_vision_tower()` 関数: ロード後にvision_tower内の `bnb.nn.Linear4bit` を検出し、safetensorsからオリジナルweightをbf16で差し替え
-- VRAM増加: +302MiB（ロード時 2071→2373 MiB）。コスト極小
-- 効果: 画面内テキスト（日本語・英語）のOCR、画面内容の正確な認識が可能に
-- config.yaml: `vision_fp16: true` で有効化
+- `_dequantize_tower(model, model_id, tower_name)` 関数: 指定tower内の `bnb.nn.Linear4bit` を検出し、safetensorsからオリジナルweightをbf16で差し替え。v2.2でvision専用関数から汎用化
+- vision_tower: 113層、VRAM +302MiB（2071→2373 MiB）。画面テキストOCR・画面内容の正確な認識が可能に
+- audio_tower: 134層、VRAM +582MiB（2373→2955 MiB）。楽器識別・歌詞聞き取り・音楽ムード把握が可能に
+- config.yaml: `vision_fp16: true` / `audio_fp16: true` で個別に有効化
 
 #### 推論パイプライン
 
@@ -227,7 +238,8 @@ systemプロンプトに以下を動的に追加:
 
 ```python
 FOCUS_SUFFIX = "2枚目は注目部分のズーム。そこに見えるものに具体的に触れろ。"
-AUDIO_SUFFIX = "聞こえる音にも反応しろ。会話の内容が聞き取れたら触れろ。"
+AUDIO_SUFFIX = "音声も聞こえている。会話が聞こえたら内容に反応しろ。"
+AUDIO_SYSTEM_SUFFIX = "C. 聞こえた会話への反応（1個まで）..."  # systemプロンプトに動的注入
 
 user_prompt = persona["user"]                          # ベース: "この画面にニコニコ風コメントして。短く、説明なし。"
 if pil_focus:  user_prompt += FOCUS_SUFFIX             # + focus
@@ -261,7 +273,7 @@ inputs = processor.apply_chat_template(
 ).to(model.device)
 
 outputs = model.generate(
-    **inputs, max_new_tokens=120,
+    **inputs, max_new_tokens=120,  # v2.3: quantized KV cache廃止、bnb_4bit_compute_dtype=bf16
     do_sample=True, temperature=1.0, top_p=0.95, top_k=64,
 )
 ```
@@ -392,7 +404,7 @@ pending残量ベースの動的間隔制御:
 | Main Thread | GUI (PyQt5) | PyQt5イベントループ。オーバーレイ描画とシステムトレイ。QTimerでcomment_queueをポーリング+ドリップ制御。 |
 | Capture Thread | daemon | capture_interval秒ごとにキャプチャ。グリッド差分検知+フォーカスクロップ+ウィンドウタイトル取得。image_queueにput()。 |
 | AI Thread | daemon | image_queueからget()。音声スナップショット取得。ウィンドウタイトル注入+コメント生成+フィルター+色付与。comment_queueにput()。 |
-| Audio Thread (v1.9+) | daemon | enable_audio: true時のみ起動。sounddeviceコールバックでWASAPI loopback音声を循環バッファに常時記録。AI Threadがget_audio()で読み出し。 |
+| Audio Thread (v1.9+) | daemon | enable_audio: true時のみ起動。pyaudiowpatchでWASAPI loopback音声を循環バッファに常時記録。AI Threadがget_audio()で読み出し。 |
 
 > PyQt5のGUI操作は必ずMain Threadで行うこと。Queueを介した間接通信のみを使用。
 > `TOKENIZERS_PARALLELISM=false` を設定してトークナイザのスレッド競合を防止。
@@ -421,10 +433,12 @@ config.yaml でカスタマイズ可能:
 | `focus_diff_threshold` | 0.05 | float | フォーカス対象とするdiff閾値 |
 | `focus_crop_size` | 640 | int (px) | クロップ画像の長辺 |
 | `enable_audio` | false | bool | デスクトップ音声キャプチャの有効/無効 |
-| `audio_buffer_seconds` | 10 | int (sec) | 音声ローリングバッファ長（v2.1: 5→10秒に拡張） |
+| `audio_buffer_seconds` | 5 | int (sec) | 音声ローリングバッファ長（v2.3: 10→5秒に短縮。音声トークン削減でコメント数改善） |
 | `audio_device` | null | str/int | 音声デバイス（null=デフォルト出力のloopback自動検出） |
 | `audio_silence_threshold` | 0.001 | float | 無音判定RMS閾値 |
+| `audio_target_rms` | 0.05 | float | RMS正規化の目標レベル。0で無効（v2.2新設） |
 | `vision_fp16` | true | bool | vision_tower bf16差し替えの有効/無効（v2.1新設） |
+| `audio_fp16` | true | bool | audio_tower bf16差し替えの有効/無効（v2.2新設。+~582MiB VRAM） |
 | `debug_dump` | false | bool | デバッグダンプの有効/無効（v2.1新設。2サイクル目にdebug_dump/へ保存） |
 | `font_size` | 36 | int | コメントのフォントサイズ |
 | `scroll_speed` | 3.0 | float | コメントの流れる速度 (px/frame) |
@@ -468,7 +482,7 @@ BackseatSimulator/
 │   └── audio.py        # デスクトップ音声キャプチャ (WASAPI loopback + 循環バッファ)
 ├── ai/
 │   ├── __init__.py
-│   ├── analyzer.py     # Transformersインプロセス推論 + vision_tower bf16差し替え + コンテクスト注入 + フィルター + 色割り当て
+│   ├── analyzer.py     # Transformersインプロセス推論 + tower bf16差し替え(汎用) + コンテクスト注入 + フィルター + 色割り当て
 │   └── prompts.py      # ペルソナ定義
 ├── overlay/
 │   ├── __init__.py
@@ -483,23 +497,26 @@ BackseatSimulator/
 
 ## 8. VRAM管理
 
-| モデル | dtype=auto | 4bit量子化 | 4bit + vision bf16 | 備考 |
-|--------|-----------|-----------|-------------------|------|
-| E2B | 約6GB | 約3.5GB | 約3.8GB (+302MiB) | RTX 3060 Ti 8GBで動作 |
-| E4B | 約10GB | 約5GB | — | 12GB VRAM推奨 |
+| モデル | dtype=auto | 4bit量子化 | 4bit + vision bf16 | 4bit + vision&audio bf16 | 備考 |
+|--------|-----------|-----------|-------------------|------------------------|------|
+| E2B | 約6GB | 約3.5GB | 約3.8GB (+302MiB) | **約4.4GB (+884MiB)** | RTX 3060 Ti 8GBで動作 |
+| E4B | 約10GB | 約5GB | — | — | 12GB VRAM推奨 |
 
-**v2.1 実測値 (E2B 4bit + vision bf16, budget=1120):**
+**v2.3 実測値 (E2B 4bit + vision&audio bf16, budget=1120):**
 
 | 状態 | VRAM |
 |------|------|
-| モデルロード後 | ~2373 MiB |
+| モデルロード後（量子化のみ） | ~2071 MiB |
+| + vision_tower bf16 | ~2373 MiB (+302) |
+| + audio_tower bf16 | ~2955 MiB (+582) |
 | 推論運用時 | ~5800 MiB |
 | VRAM余裕 (8.2GB中) | ~2.3 GB |
 
 - モデルは起動時に1回ロード、プロセス終了まで保持
 - 推論ごとの `torch.cuda.empty_cache()` は不要（逆に遅くなる）
 - `torch.inference_mode()` で推論時のメモリ効率を最適化
-- vision_tower bf16差し替えのVRAMコストは+302MiBと極小
+- tower bf16差し替えの合計VRAMコストは+884MiBで8GB GPUに十分収まる
+- audio_fp32昇格は実験の結果bf16と有意差なしのため不採用（v2.3で検証済み）
 
 ---
 
@@ -511,7 +528,7 @@ BackseatSimulator/
 | 2 | ウィンドウタイトル偏重 | 許容 | タイトルをsystemに入れることで緩和済み。デスクトップ作業時にやや収束傾向 |
 | 3 | 応援ペルソナのバリエーション | 構造的制約 | 「褒める」は画面内容から切り口を見つけにくい。ネガティブ禁止+B節応援辞書で実用的な品質 |
 | 4 | JSON出力の安定性 | 要監視 | プロンプト指示+パースフォールバックに依存。thinkingタグ混入の可能性あり |
-| 5 | 音声認識(ASR)の4bit量子化限界 | 構造的制約 | conformer 12層の4bit量子化で音素弁別精度が失われている。プロソディ検知（エネルギー・ピッチ・テンポ）は有効だが、会話内容の理解（ASR）は4bit量子化下では不能 |
+| 5 | 音声認識の精度限界 | 改善（v2.2） | audio_tower bf16化で楽器識別・ムード把握・歌詞断片の認識が可能に。ただし完全なASR（正確な書き起こし）には至らず、日本語歌詞は空耳レベル。英語歌詞は断片的に拾える |
 | 6 | enable_focusの暫定無効化 | 要再検討 | budget=1120でフォーカスクロップの効果が薄れたため暫定false。特定ユースケースで再有効化の余地あり |
 
 ---
@@ -531,4 +548,6 @@ BackseatSimulator/
 | v1.8 | 2026/04/07 | ペルソナ整理（4種→2種: shijicyu+home）。homeのA節から「褒める」削除、ネガティブ禁止+B節応援辞書で差別化。トレイメニューに再起動追加（os.execv）。LLMが無視する指示を削除 |
 | v1.9 | 2026/04/07 | LLMバックエンドをOllama REST APIからHuggingFace Transformers（インプロセス推論）に移行。AutoModelForMultimodalLM採用（音声対応の布石）。モデルロードをmain.pyで起動時に実行。_parse_responseにthinkingタグ除去・Markdownブロック除去・JSON抽出フォールバック追加。環境変数(HF_HUB_OFFLINE等)設定追加。librosa追加（音声対応準備）。config.yamlからollama_url/model_name削除、model_id/quantization/device_map/max_new_tokens追加 |
 | v1.9+audio | 2026/04/07 | デスクトップ音声入力。Gemma 4 E2Bネイティブaudio encoder活用（別STT不要）。capture/audio.py新規（WASAPI loopback+sounddevice+循環バッファ+scipy resample）。userプロンプトを連結方式に変更（user_with_focus廃止→FOCUS_SUFFIX/AUDIO_SUFFIXを条件連結）。config.yamlにaudio設定セクション追加（enable_audio: false デフォルト）。comments.logにaudioフィールド追加 |
-| **v2.1** | **2026/04/07** | **vision_tower bf16差し替え（`_dequantize_vision_tower()`、+302MiB、OCR・画面認識の劇的改善）。scene機能の完全廃止（sceneフィールド・SCENE_TRANSITION/CONTINUE_TEMPLATE・_prev_scene・_update_scene・reset_scene・scene TTL関連すべて削除、JSON応答形式を`{"comments":[...]}`に簡素化）。音声ピークノーマライズ追加（`peak/max(abs)`正規化）。オーバーレイ`_raise_topmost`タイマー追加（5秒ごとSetWindowPos HWND_TOPMOST）。デバッグダンプ機能（debug_dump: true→2サイクル目にfull.png/focus.png/audio.wav/prompt.txt保存）。設定値変更: visual_token_budget 140→1120、max_new_tokens 150→120、audio_buffer_seconds 5→10、enable_focus true→false（暫定）、新設 vision_fp16/debug_dump。推論速度 20〜25秒→7〜13秒/サイクル。VRAM運用時 ~4000→~5800 MiB。AUDIO_SUFFIXに「会話の内容が聞き取れたら触れろ。」追加。プロンプト「そのままコピーするな」→「そのまま読み上げるな。内容を踏まえた感想を言え」に変更。音声認識実測: プロソディ検知有効、ASR（音声認識）は4bit量子化下では不能（conformer 12層の精度劣化）** |
+| v2.1 | 2026/04/07 | vision_tower bf16差し替え（`_dequantize_vision_tower()`、+302MiB、OCR・画面認識の劇的改善）。scene機能の完全廃止（sceneフィールド・SCENE_TRANSITION/CONTINUE_TEMPLATE・_prev_scene・_update_scene・reset_scene・scene TTL関連すべて削除、JSON応答形式を`{"comments":[...]}`に簡素化）。音声ピークノーマライズ追加（`peak/max(abs)`正規化）。オーバーレイ`_raise_topmost`タイマー追加（5秒ごとSetWindowPos HWND_TOPMOST）。デバッグダンプ機能（debug_dump: true→2サイクル目にfull.png/focus.png/audio.wav/prompt.txt保存）。設定値変更: visual_token_budget 140→1120、max_new_tokens 150→120、audio_buffer_seconds 5→10、enable_focus true→false（暫定）、新設 vision_fp16/debug_dump。推論速度 20〜25秒→7〜13秒/サイクル。VRAM運用時 ~4000→~5800 MiB。AUDIO_SUFFIXに「会話の内容が聞き取れたら触れろ。」追加。プロンプト「そのままコピーするな」→「そのまま読み上げるな。内容を踏まえた感想を言え」に変更。音声認識実測: プロソディ検知有効、ASR（音声認識）は4bit量子化下では不能（conformer 12層の精度劣化） |
+| v2.2 | 2026/04/08 | audio_tower bf16差し替え（`_dequantize_tower()`汎用化、134層、+582MiB、音声認識品質の劇的改善）。ピークノーマライズ→RMS正規化に変更（target_rms=0.05、クリッピング歪み解消）。sounddevice→pyaudiowpatchに移行。音声認識実測: 楽器識別・音楽ムード把握・英語歌詞断片・コンテンツ文脈認識が実用レベルに到達。日本語歌詞は空耳レベルだが文脈は拾える。新設 audio_fp16/audio_target_rms。VRAM: ロード時2955 MiB（vision+audio bf16込み） |
+| **v2.3** | **2026/04/08** | **推論高速化: bnb_4bit_compute_dtype=bf16（~20%高速化）、quantized KV cache廃止（quanto 4bitが短コンテキストで逆効果）。音声バッファ10→5秒（音声トークン250→125、コメント数1.8→4.1個に改善）。音声反応スロット: AUDIO_SYSTEM_SUFFIXでC枠（1個まで）をsystemプロンプトに動的注入、画面/音声バランス確保。パイプライン改善: 推論後の滞留フレームスキップ＋低コメント時の動的待機（≤1コメント→+capture_interval秒待機）で短サイクル1コメント連鎖を解消。オーバーレイ: WDA_EXCLUDEFROMCAPTUREで自己コメントのキャプチャ除外。プロンプト: 「5〜8個返せ。5個未満は禁止」追加。transcribeペルソナ（診断用）追加。LogitsProcessorによるEOS抑制は品質劣化で不採用。VRAM: 運用時~6500 MiB** |

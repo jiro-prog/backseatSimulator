@@ -57,11 +57,13 @@ def capture_loop(screen_capture: ScreenCapture, image_queue: queue.Queue,
 
 
 def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
-            comment_queue: queue.Queue, audio_capture=None):
+            comment_queue: queue.Queue, audio_capture=None,
+            capture_interval: int = 8):
     """AIスレッド: 画像を受け取りコメント生成。"""
+    first_cycle = True
     while True:
         try:
-            data = image_queue.get()  # ブロッキング
+            data = image_queue.get()  # ブロッキング（新鮮なフレームを待つ）
             logger.info("AI分析開始...")
 
             # 音声スナップショット取得
@@ -97,6 +99,26 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
                     logger.exception("コメントログ書き込み失敗")
             else:
                 logger.info("コメントなし")
+
+            # 推論完了後: 滞留フレームを捨てて次の新鮮なキャプチャを待つ
+            # （初回は滞留がないのでスキップ）
+            if not first_cycle:
+                skipped = 0
+                while not image_queue.empty():
+                    try:
+                        image_queue.get_nowait()
+                        skipped += 1
+                    except queue.Empty:
+                        break
+                if skipped:
+                    logger.info("滞留フレーム %d 枚スキップ", skipped)
+
+            # コメント数が少なかった場合、画面が変わるまで待つ
+            comment_count = len(comments) if comments else 0
+            if not first_cycle and comment_count <= 1:
+                logger.info("コメント少数(%d個)、%d秒待機", comment_count, capture_interval)
+                time.sleep(capture_interval)
+            first_cycle = False
         except Exception:
             logger.exception("AIスレッドでエラー")
 
@@ -164,7 +186,8 @@ def main():
     # AIスレッド起動
     ai_thread = threading.Thread(
         target=ai_loop,
-        args=(ai_analyzer, image_queue, comment_queue, audio_capture),
+        args=(ai_analyzer, image_queue, comment_queue, audio_capture,
+              config.get("capture_interval", 8)),
         daemon=True,
     )
     ai_thread.start()
