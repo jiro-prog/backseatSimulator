@@ -7,7 +7,7 @@ PERSONA_LABELS = {
     "heckle": "ヤジ",
     "backseat": "指示厨",
     "hype": "ワイワイ",
-    "mix": "ミックス",
+    "mix": "盛+煽",
 }
 
 CAPTURE_MODE_LABELS = {

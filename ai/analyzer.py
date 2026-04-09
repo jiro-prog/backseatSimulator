@@ -30,7 +30,8 @@ MIX_TYPE_COLORS = {
 _TAG_TO_KEY = {tag: key for key, (tag, _) in MIX_TYPE_INFO.items()}
 NG_WORDS = ["実況", "ツッコミ", "カテゴリ", "コメント", "リアクション", "応援",
             "何これ", "なにこれ", "何それ", "なにそれ", "なんだこれ", "何だこれ",
-            "ケチ", "すごい", "すげー", "すげえ"]
+            "ケチ", "すごい", "すげー", "すげえ",
+            "音声", "画面", "デスクトップ", "スクリーン"]
 PREFIX_LEN = 2  # 先頭N文字一致で表記ゆれ重複を判定（4文字以上のコメントのみ適用）
 
 
@@ -275,8 +276,9 @@ class AIAnalyzer:
 
         # コンテクスト注入
         system_prompt = persona["system"]
-        if self.persona == "mix":
-            system_prompt = system_prompt.replace("{mix_ratio}", self._build_mix_ratio())
+        if "mix_ratio" in persona.get("system", ""):
+            mix_keys = persona.get("mix_keys", ["hype", "heckle", "backseat"])
+            system_prompt = system_prompt.replace("{mix_ratio}", self._build_mix_ratio(mix_keys))
         if audio_data is not None:
             system_prompt += AUDIO_SYSTEM_SUFFIX
         if window_title:
@@ -349,8 +351,8 @@ class AIAnalyzer:
 
         comments = self._parse_response(response_text)
         # mixモード: 比率フィルタ + タイプ別カラー
-        if self.persona == "mix":
-            comments = self._apply_mix_ratio(comments)
+        if persona.get("mix_keys"):
+            comments = self._apply_mix_ratio(comments, persona["mix_keys"])
         # summary抽出（enable_summary有効時のみ）
         if persona.get("enable_summary"):
             summary = self._extract_summary(response_text)
@@ -547,12 +549,14 @@ class AIAnalyzer:
         except Exception:
             logger.exception("デバッグダンプ保存失敗")
 
-    def _build_mix_ratio(self) -> str:
+    def _build_mix_ratio(self, keys=None) -> str:
         """configのmix_weightsから比率指示テキストを生成する。"""
-        total_w = sum(self._mix_weights.values())
+        if keys is None:
+            keys = ["hype", "heckle", "backseat"]
+        total_w = sum(self._mix_weights.get(k, 0) for k in keys)
         parts = []
         total_n = 0
-        for key in ("hype", "heckle", "backseat"):
+        for key in keys:
             w = self._mix_weights.get(key, 0)
             if w <= 0:
                 continue
@@ -562,23 +566,26 @@ class AIAnalyzer:
             parts.append(f"{tag}{n}個")
         return f"{total_n}個を混ぜろ: {'、'.join(parts)}"
 
-    def _apply_mix_ratio(self, comments: list[dict]) -> list[dict]:
+    def _apply_mix_ratio(self, comments: list[dict],
+                         keys: list[str] | None = None) -> list[dict]:
         """mixモードのコメントを比率でフィルタし、タイプ別カラーを割り当てる。"""
+        if keys is None:
+            keys = ["hype", "heckle", "backseat"]
         # タグ別にグループ化
         groups: dict[str, list[dict]] = {}
         untagged: list[dict] = []
         for c in comments:
             tag = c.get("type", "")
-            if tag in _TAG_TO_KEY:
+            if tag in _TAG_TO_KEY and _TAG_TO_KEY[tag] in keys:
                 groups.setdefault(tag, []).append(c)
             else:
                 untagged.append(c)
 
         # 比率に基づいて各タグから取得
-        total_w = sum(self._mix_weights.values())
+        total_w = sum(self._mix_weights.get(k, 0) for k in keys)
         target_total = 8
         result = []
-        for key in ("hype", "heckle", "backseat"):
+        for key in keys:
             w = self._mix_weights.get(key, 0)
             if w <= 0:
                 continue
