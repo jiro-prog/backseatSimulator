@@ -13,7 +13,11 @@ model_id: "google/gemma-4-E2B-it"   # HuggingFace モデルID
 quantization: "4bit"                 # auto | 4bit | 8bit | none
 device_map: "cuda:0"                 # auto | cpu | cuda:0
 max_new_tokens: 120                  # 生成トークン上限
-persona: "heckle"                    # プロンプトプリセット名 (heckle / backseat / hype)
+persona: "heckle"                    # プロンプトプリセット名 (heckle / backseat / hype / mix)
+mix_weights:                           # mixモード時のペルソナ比率
+  hype: 5
+  heckle: 3
+  backseat: 2
 visual_token_budget: 1120            # ビジュアルトークン予算 (70/140/280/560/1120)
 ple_offload: true                    # PLEテーブルをCPUにオフロード (VRAM ~4.5GB削減)
 vision_fp16: true                    # vision_towerをbf16で保持（推奨）

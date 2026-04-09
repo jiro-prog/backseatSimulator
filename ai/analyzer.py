@@ -14,12 +14,20 @@ from PIL import Image
 from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
 from ai.prompts import (AUDIO_SUFFIX, AUDIO_SYSTEM_SUFFIX, FOCUS_SUFFIX,
-                        PERSONAS, PREV_SUMMARY_TEMPLATE,
+                        MIX_TYPE_INFO, PERSONAS, PREV_SUMMARY_TEMPLATE,
                         WINDOW_TITLE_TEMPLATE)
 
 logger = logging.getLogger(__name__)
 
 COLORS_ACCENT = ["#FF4444", "#44FF44", "#FFFF00", "#FF69B4", "#87CEEB"]
+# mixモード: タイプ別カラー
+MIX_TYPE_COLORS = {
+    "盛": "#FFFF00",   # yellow (hype)
+    "煽": "#FF4444",   # red (heckle)
+    "指": "#87CEEB",   # sky blue (backseat)
+}
+# タグ文字 → configキー
+_TAG_TO_KEY = {tag: key for key, (tag, _) in MIX_TYPE_INFO.items()}
 NG_WORDS = ["実況", "ツッコミ", "カテゴリ", "コメント", "リアクション", "応援",
             "何これ", "なにこれ", "何それ", "なにそれ", "なんだこれ", "何だこれ",
             "ケチ", "すごい", "すげー", "すげえ"]
@@ -239,6 +247,9 @@ class AIAnalyzer:
         self._recent_texts: collections.deque = collections.deque(maxlen=100)
         self._prev_window_title: str = ""
         self._prev_summaries: collections.deque = collections.deque(maxlen=3)
+        self._last_good_comments: list[dict] = []
+        self._mix_weights: dict = config.get("mix_weights",
+                                             {"hype": 5, "heckle": 3, "backseat": 2})
         self._debug_dump_countdown: int = 2 if config.get("debug_dump", False) else 0
 
     def analyze(self, full_image: str, focus_image: str | None = None,
@@ -264,6 +275,8 @@ class AIAnalyzer:
 
         # コンテクスト注入
         system_prompt = persona["system"]
+        if self.persona == "mix":
+            system_prompt = system_prompt.replace("{mix_ratio}", self._build_mix_ratio())
         if audio_data is not None:
             system_prompt += AUDIO_SYSTEM_SUFFIX
         if window_title:
@@ -335,6 +348,9 @@ class AIAnalyzer:
             return []
 
         comments = self._parse_response(response_text)
+        # mixモード: 比率フィルタ + タイプ別カラー
+        if self.persona == "mix":
+            comments = self._apply_mix_ratio(comments)
         # summary抽出（enable_summary有効時のみ）
         if persona.get("enable_summary"):
             summary = self._extract_summary(response_text)
@@ -343,6 +359,14 @@ class AIAnalyzer:
                 logger.info("状況要約: %s", summary)
         if window_title:
             self._prev_window_title = window_title
+        # フォールバック: パース失敗時に前回コメントを延命
+        if not comments and self._last_good_comments:
+            logger.info("パース失敗、前回コメント延命 (%d個)", len(self._last_good_comments))
+            fallback = list(self._last_good_comments)
+            self._last_good_comments = []  # 延命は1回限り
+            return fallback
+        if comments:
+            self._last_good_comments = comments
         return comments
 
     @staticmethod
@@ -391,19 +415,43 @@ class AIAnalyzer:
 
             # 正規表現フォールバック
             if not comments:
+                # オブジェクト形式: {"text": "..."} or {"t": "...", "text": "..."}
                 pattern = r'\{\s*"text"\s*:\s*"([^"]+)"\s*\}'
                 matches = re.findall(pattern, raw)
                 for text in matches:
                     comments.append({"text": text})
+            if not comments:
+                # 文字列配列形式: "盛:コメント" (mixモード)
+                matches = re.findall(r'"([^"]{1,30}:[^"]{1,30})"', raw)
+                for m in matches:
+                    comments.append(m)  # 文字列としてcommentsに追加
 
         # バリデーションとサニタイズ
         result = []
         seen_texts = set()
         seen_prefixes = set()
         for c in comments:
-            if not isinstance(c, dict):
+            tag = ""
+            if isinstance(c, str):
+                # "盛:コメント" 形式の文字列要素（mixモード）
+                if ":" in c:
+                    tag, text = c.split(":", 1)
+                    tag = tag.strip()
+                    text = text.strip()
+                else:
+                    text = c.strip()
+            elif isinstance(c, dict):
+                text = str(c.get("text", c.get("comment", ""))).strip()
+                tag = str(c.get("t", "")).strip()
+                # "盛: テキスト" がtext内に埋まっているケース
+                if not tag and text and ":" in text[:3]:
+                    maybe_tag, rest = text.split(":", 1)
+                    if maybe_tag.strip() in _TAG_TO_KEY:
+                        tag = maybe_tag.strip()
+                        text = rest.strip()
+            else:
                 continue
-            text = str(c.get("text", "")).strip().strip("「」")
+            text = text.strip("「」")
             if not text:
                 continue
             if len(text) > 30:
@@ -420,7 +468,10 @@ class AIAnalyzer:
                 continue
             if any(ng in text for ng in NG_WORDS):
                 continue
-            result.append({"text": text, "color": self._assign_color()})
+            entry = {"text": text, "color": self._assign_color()}
+            if tag:
+                entry["type"] = tag
+            result.append(entry)
 
         pre_dedup_count = len(result)
 
@@ -474,6 +525,66 @@ class AIAnalyzer:
             logger.info("デバッグダンプ保存: %s", dump_dir)
         except Exception:
             logger.exception("デバッグダンプ保存失敗")
+
+    def _build_mix_ratio(self) -> str:
+        """configのmix_weightsから比率指示テキストを生成する。"""
+        total_w = sum(self._mix_weights.values())
+        parts = []
+        total_n = 0
+        for key in ("hype", "heckle", "backseat"):
+            w = self._mix_weights.get(key, 0)
+            if w <= 0:
+                continue
+            n = max(1, round(w / total_w * 8))
+            total_n += n
+            tag, _ = MIX_TYPE_INFO[key]
+            parts.append(f"{tag}{n}個")
+        return f"{total_n}個を混ぜろ: {'、'.join(parts)}"
+
+    def _apply_mix_ratio(self, comments: list[dict]) -> list[dict]:
+        """mixモードのコメントを比率でフィルタし、タイプ別カラーを割り当てる。"""
+        # タグ別にグループ化
+        groups: dict[str, list[dict]] = {}
+        untagged: list[dict] = []
+        for c in comments:
+            tag = c.get("type", "")
+            if tag in _TAG_TO_KEY:
+                groups.setdefault(tag, []).append(c)
+            else:
+                untagged.append(c)
+
+        # 比率に基づいて各タグから取得
+        total_w = sum(self._mix_weights.values())
+        target_total = 8
+        result = []
+        for key in ("hype", "heckle", "backseat"):
+            w = self._mix_weights.get(key, 0)
+            if w <= 0:
+                continue
+            tag, _ = MIX_TYPE_INFO[key]
+            target_n = max(1, round(w / total_w * target_total))
+            available = groups.get(tag, [])
+            result.extend(available[:target_n])
+
+        # 足りなければ未タグで補充
+        remaining = target_total - len(result)
+        if remaining > 0:
+            result.extend(untagged[:remaining])
+
+        # タイプ別カラー割り当て
+        for c in result:
+            tag = c.get("type", "")
+            if tag in MIX_TYPE_COLORS:
+                c["color"] = MIX_TYPE_COLORS[tag]
+
+        random.shuffle(result)
+        logger.info("mixフィルタ: 入力%d → 出力%d (盛=%d 煽=%d 指=%d 他=%d)",
+                     len(comments), len(result),
+                     sum(1 for c in result if c.get("type") == "盛"),
+                     sum(1 for c in result if c.get("type") == "煽"),
+                     sum(1 for c in result if c.get("type") == "指"),
+                     sum(1 for c in result if c.get("type", "") not in _TAG_TO_KEY))
+        return result
 
     def _assign_color(self) -> str:
         if random.random() < 0.2:

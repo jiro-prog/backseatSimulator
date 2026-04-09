@@ -110,10 +110,10 @@ class TestFallback:
         assert result == []
 
     def test_no_text_key(self):
-        """text キーがない dict はスキップ。"""
-        raw = json.dumps([{"comment": "abc"}, {"text": "ok"}])
+        """text キーがない dict はスキップ。comment キーはフォールバック。"""
+        raw = json.dumps([{"other": "skip"}, {"comment": "abc"}, {"text": "ok"}])
         result = make_analyzer()._parse_response(raw)
-        assert texts(result) == ["ok"]
+        assert texts(result) == ["abc", "ok"]
 
 
 # ---------- バリデーション・フィルタ ----------
