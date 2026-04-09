@@ -71,15 +71,25 @@ class OverlayWindow(QWidget):
         # キャプチャ除外（自分のコメントがスクリーンショットに映らないようにする）
         self._exclude_from_capture()
 
-        # 起動時の挨拶コメント
-        greeting = [
+        # 起動時の挨拶コメント（プールから5個ランダム抽出）
+        _GREETING_POOL = [
             {"text": "わこつ", "color": "#FFFFFF"},
             {"text": "わこつです", "color": "#FFFFFF"},
             {"text": "わこつー", "color": "#87CEEB"},
             {"text": "きた", "color": "#FFB347"},
             {"text": "はじまった", "color": "#44FF44"},
+            {"text": "きたきた", "color": "#FFFFFF"},
+            {"text": "お、始まった", "color": "#FFFFFF"},
+            {"text": "待ってた", "color": "#FF69B4"},
+            {"text": "こんにちは", "color": "#FFFFFF"},
+            {"text": "やっほー", "color": "#87CEEB"},
+            {"text": "おじゃまします", "color": "#FFFFFF"},
+            {"text": "よろしくー", "color": "#44FF44"},
+            {"text": "ノシ", "color": "#FFFFFF"},
+            {"text": "来たぞ", "color": "#FFB347"},
+            {"text": "参上", "color": "#FF4444"},
         ]
-        for c in greeting:
+        for c in random.sample(_GREETING_POOL, 5):
             self._pending.append(c)
 
     def _find_free_slot(self, text_width: int) -> int | None:

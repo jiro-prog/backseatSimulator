@@ -4,8 +4,9 @@ from PyQt5.QtWidgets import (
 )
 
 PERSONA_LABELS = {
-    "shijicyu": "指示厨",
-    "home": "応援",
+    "heckle": "ヤジ",
+    "backseat": "指示厨",
+    "hype": "ワイワイ",
 }
 
 CAPTURE_MODE_LABELS = {
@@ -51,7 +52,7 @@ class SystemTray:
         menu.addAction(self.pause_action)
 
         # ペルソナ切替サブメニュー
-        current_persona = config.get("persona", "shijicyu")
+        current_persona = config.get("persona", "heckle")
         if isinstance(current_persona, list):
             current_persona = current_persona[0]
         persona_menu = QMenu("ペルソナ", menu)

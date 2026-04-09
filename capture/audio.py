@@ -1,6 +1,7 @@
 import logging
 import struct
 import threading
+import time
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -115,9 +116,12 @@ class AudioCapture:
 
     def _capture_thread(self):
         """読み取りスレッド。streamからデータを読んでバッファに書き込む。"""
+        backoff = 0.5
+        max_backoff = 30
         while self._running:
             try:
                 data = self._stream.read(_CHUNK, exception_on_overflow=False)
+                backoff = 0.5  # 成功時リセット
                 # bytes → float32 numpy
                 samples = np.frombuffer(data, dtype=np.float32)
                 n = len(samples)
@@ -133,9 +137,29 @@ class AudioCapture:
                         self._buffer[:n - first] = samples[first:]
                     self._write_pos = end % buf_len
             except Exception:
-                if self._running:
-                    logger.exception("音声読み取りエラー")
-                break
+                if not self._running:
+                    break
+                logger.exception("音声読み取りエラー、%.1f秒後に再接続", backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+                try:
+                    if self._stream is not None:
+                        try:
+                            self._stream.stop_stream()
+                            self._stream.close()
+                        except Exception:
+                            pass
+                    self._stream = self._pa.open(
+                        format=pyaudio.paFloat32,
+                        channels=self._channels,
+                        rate=self._native_sr,
+                        input=True,
+                        input_device_index=self._device_info["index"],
+                        frames_per_buffer=_CHUNK,
+                    )
+                    logger.info("音声ストリーム再接続成功")
+                except Exception:
+                    logger.exception("音声ストリーム再接続失敗")
 
     def start(self):
         """キャプチャを開始する。"""

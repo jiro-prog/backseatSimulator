@@ -179,13 +179,17 @@ def main():
     except FileNotFoundError:
         logger.warning("config.yaml が見つかりません。デフォルト設定で起動します。")
         config = {}
+    except yaml.YAMLError:
+        logger.exception("config.yaml の解析に失敗しました。デフォルト設定で起動します。")
+        config = {}
 
     # 前回のトレイ設定を復元
     state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state.json")
+    _ALLOWED_STATE_KEYS = {"persona", "capture_mode", "enable_audio"}
     try:
         with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
-        config.update(state)
+        config.update({k: v for k, v in state.items() if k in _ALLOWED_STATE_KEYS})
         logger.info("前回の設定を復元: %s", state)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
@@ -302,10 +306,14 @@ def main():
         if audio_capture is not None:
             audio_capture.stop()
         lock_file.close()
-        subprocess.Popen(
-            [sys.executable] + sys.argv,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-        )
+        restart_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "restart.log")
+        with open(restart_log, "w") as rl:
+            subprocess.Popen(
+                [sys.executable] + sys.argv,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                stdout=rl,
+                stderr=rl,
+            )
         app.quit()
 
     _restart_timer.timeout.connect(_do_restart)

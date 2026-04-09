@@ -14,14 +14,15 @@ from PIL import Image
 from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
 from ai.prompts import (AUDIO_SUFFIX, AUDIO_SYSTEM_SUFFIX, FOCUS_SUFFIX,
-                        PERSONAS, WINDOW_TITLE_TEMPLATE)
+                        PERSONAS, PREV_SUMMARY_TEMPLATE,
+                        WINDOW_TITLE_TEMPLATE)
 
 logger = logging.getLogger(__name__)
 
 COLORS_ACCENT = ["#FF4444", "#44FF44", "#FFFF00", "#FF69B4", "#87CEEB"]
 NG_WORDS = ["実況", "ツッコミ", "カテゴリ", "コメント", "リアクション", "応援",
             "何これ", "なにこれ", "何それ", "なにそれ", "なんだこれ", "何だこれ",
-            "口出し", "指示厨"]
+            "ケチ", "すごい", "すげー", "すげえ"]
 PREFIX_LEN = 2  # 先頭N文字一致で表記ゆれ重複を判定（4文字以上のコメントのみ適用）
 
 
@@ -122,7 +123,11 @@ def _dequantize_tower(model, model_id: str, tower_name: str,
     from safetensors import safe_open
     from huggingface_hub import snapshot_download
 
-    model_path = snapshot_download(model_id, local_files_only=True)
+    try:
+        model_path = snapshot_download(model_id, local_files_only=True)
+    except Exception:
+        logger.warning("%s: ローカルキャッシュが見つかりません、bf16差し替えをスキップ", tower_name)
+        return
 
     import glob as glob_mod
     st_files = glob_mod.glob(os.path.join(model_path, "*.safetensors"))
@@ -228,18 +233,19 @@ class AIAnalyzer:
         self.model = model
         self.processor = processor
         self.config = config
-        self.persona = config.get("persona", "shijicyu")
+        self.persona = config.get("persona", "heckle")
         self.visual_token_budget = config.get("visual_token_budget", 1120)
         self.max_new_tokens = config.get("max_new_tokens", 120)
         self._recent_texts: collections.deque = collections.deque(maxlen=100)
         self._prev_window_title: str = ""
+        self._prev_summaries: collections.deque = collections.deque(maxlen=3)
         self._debug_dump_countdown: int = 2 if config.get("debug_dump", False) else 0
 
     def analyze(self, full_image: str, focus_image: str | None = None,
                 window_title: str = "",
                 audio_data: "np.ndarray | None" = None) -> list[dict]:
         """Transformersでインプロセス推論し、コメントリストを返す。"""
-        persona = PERSONAS.get(self.persona, PERSONAS["shijicyu"])
+        persona = PERSONAS.get(self.persona, PERSONAS["heckle"])
 
         # base64 → PIL.Image 変換
         pil_full = self._b64_to_pil(full_image) if full_image else None
@@ -262,6 +268,9 @@ class AIAnalyzer:
             system_prompt += AUDIO_SYSTEM_SUFFIX
         if window_title:
             system_prompt += WINDOW_TITLE_TEMPLATE.format(window_title=window_title)
+        if persona.get("enable_summary") and self._prev_summaries:
+            system_prompt += PREV_SUMMARY_TEMPLATE.format(
+                summaries=" → ".join(self._prev_summaries))
 
         # messages 構築 (Transformers chat template形式)
         user_content = []
@@ -304,7 +313,7 @@ class AIAnalyzer:
             with torch.inference_mode():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=self.max_new_tokens,
+                    max_new_tokens=persona.get("max_new_tokens", self.max_new_tokens),
                     do_sample=True,
                     temperature=1.0,
                     top_p=0.95,
@@ -326,6 +335,12 @@ class AIAnalyzer:
             return []
 
         comments = self._parse_response(response_text)
+        # summary抽出（enable_summary有効時のみ）
+        if persona.get("enable_summary"):
+            summary = self._extract_summary(response_text)
+            if summary:
+                self._prev_summaries.append(summary)
+                logger.info("状況要約: %s", summary)
         if window_title:
             self._prev_window_title = window_title
         return comments
@@ -417,6 +432,26 @@ class AIAnalyzer:
         logger.info("パース結果: raw=%d → validate=%d → dedup=%d",
                      len(comments), pre_dedup_count, len(result))
         return result
+
+    @staticmethod
+    def _extract_summary(raw: str) -> str | None:
+        """AI応答からsummaryフィールドを抽出する。なければNone。"""
+        # Markdownコードブロック除去
+        md_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', raw, re.DOTALL)
+        text = md_match.group(1) if md_match else raw
+        # JSON抽出
+        brace_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if not brace_match:
+            return None
+        try:
+            parsed = json.loads(brace_match.group())
+            if isinstance(parsed, dict):
+                summary = parsed.get("summary", "")
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()[:50]  # 50文字上限
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return None
 
     def _save_debug_dump(self, pil_full, pil_focus, audio_data,
                           system_prompt, user_prompt):

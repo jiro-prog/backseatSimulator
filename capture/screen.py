@@ -260,6 +260,8 @@ class ScreenCapture:
 
     def _grab_full_desktop(self) -> Image.Image:
         with mss.mss() as sct:
+            if len(sct.monitors) < 2:
+                raise RuntimeError("モニターが検出されません (monitors=%d)" % len(sct.monitors))
             monitor = sct.monitors[1]  # プライマリモニター
             shot = sct.grab(monitor)
             return Image.frombytes("RGB", shot.size, shot.rgb)

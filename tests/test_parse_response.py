@@ -69,9 +69,9 @@ class TestJsonParsing:
 
     def test_dict_with_arbitrary_key(self):
         """キーが "comments" 以外でもリスト値を抽出。"""
-        raw = json.dumps({"results": [{"text": "すごい"}]})
+        raw = json.dumps({"results": [{"text": "やばい"}]})
         result = make_analyzer()._parse_response(raw)
-        assert texts(result) == ["すごい"]
+        assert texts(result) == ["やばい"]
 
     def test_markdown_code_block(self):
         """```json ... ``` で囲まれた応答。"""
@@ -135,10 +135,10 @@ class TestValidation:
 
     def test_prefix_duplicate_removed(self):
         """4文字以上のコメントで先頭2文字一致は後のものを除去。"""
-        raw = json.dumps([{"text": "それはすごい"}, {"text": "それなんだ"}])
+        raw = json.dumps([{"text": "それは面白い"}, {"text": "それなんだ"}])
         result = make_analyzer()._parse_response(raw)
         assert len(result) == 1
-        assert texts(result)[0] == "それはすごい"
+        assert texts(result)[0] == "それは面白い"
 
     def test_prefix_duplicate_short_exempt(self):
         """3文字以下はプレフィックス重複判定の対象外。"""

@@ -56,7 +56,7 @@ python main.py
 | `capture_interval` | キャプチャ間隔（秒） | `8` |
 | `model_id` | HuggingFace モデルID | `google/gemma-4-E2B-it` |
 | `quantization` | 量子化方式 (`4bit` / `8bit` / `none`) | `4bit` |
-| `persona` | プロンプトプリセット (`shijicyu` / `home`) | `shijicyu` |
+| `persona` | プロンプトプリセット (`heckle` / `backseat` / `hype`) | `heckle` |
 | `enable_audio` | デスクトップ音声キャプチャ | `false` |
 | `ple_offload` | PLE CPU オフロード（VRAM削減） | `true` |
 | `vision_fp16` | Vision tower を bf16 で保持 | `true` |
