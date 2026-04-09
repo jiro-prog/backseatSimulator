@@ -13,6 +13,7 @@ import threading
 import time
 
 import numpy as np
+import torch
 import yaml
 
 from ai.analyzer import AIAnalyzer, load_model  # torch を PyQt5 より先に読み込む
@@ -111,6 +112,7 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
                 window_title=data.get("window_title", ""),
                 audio_data=audio_data,
             )
+            torch.cuda.empty_cache()
             if comments:
                 comment_queue.put(comments)
                 logger.info("コメント生成: %d個 (comment_queue=%d)", len(comments), comment_queue.qsize())

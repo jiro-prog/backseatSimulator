@@ -481,7 +481,7 @@ class AIAnalyzer:
                 if prefix in seen_prefixes:
                     continue
                 seen_prefixes.add(prefix)
-            if re.search(r'[{}\[\]\\/:;=]', text):
+            if re.search(r'[{}\[\]\\/:;=,]', text):
                 continue
             if any(ng in text for ng in NG_WORDS):
                 continue
