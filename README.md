@@ -1,8 +1,17 @@
 # BackseatSimulator
 
+**[日本語](#概要) | [English](#overview)**
+
+<!-- デモGIFをここに配置 -->
+<!-- ![BackseatSimulator Demo](docs/demo.gif) -->
+
+---
+
+## 概要
+
 デスクトップ画面をリアルタイムでキャプチャし、ローカルLLM（Gemma 4）が弾幕風スクロールコメントを生成してオーバーレイ表示するアプリケーションです。デスクトップ音声のキャプチャにも対応し、映像と音声の両方に反応したコメントを生成できます。
 
-## 主な機能
+### 主な機能
 
 - アクティブウィンドウのリアルタイムキャプチャと差分検知
 - Gemma 4 E2B による画面内容へのコメント生成（4bit量子化対応）
@@ -11,14 +20,14 @@
 - ペルソナ切り替え（ヤジ / 指示厨 / ワイワイ / ミックス）
 - システムトレイからの操作（一時停止・ペルソナ変更・再起動）
 
-## 必要環境
+### 必要環境
 
 - **OS:** Windows 10/11
 - **GPU:** NVIDIA GPU（VRAM 8GB以上推奨、RTX 4060 Ti 8GB で動作確認済み）
 - **Python:** 3.10+
 - **CUDA:** 12.x
 
-## セットアップ
+### セットアップ
 
 ```bash
 # 1. リポジトリをクローン
@@ -47,7 +56,7 @@ python main.py
 
 2回目以降は `start.bat` をダブルクリックするだけで起動できます。
 
-## 設定
+### 設定
 
 `config.yaml.example` を `config.yaml` にコピーして編集してください。主な設定項目:
 
@@ -56,30 +65,112 @@ python main.py
 | `capture_interval` | キャプチャ間隔（秒） | `8` |
 | `model_id` | HuggingFace モデルID | `google/gemma-4-E2B-it` |
 | `quantization` | 量子化方式 (`4bit` / `8bit` / `none`) | `4bit` |
-| `persona` | プロンプトプリセット (`heckle` / `backseat` / `hype`) | `heckle` |
+| `persona` | プロンプトプリセット (`heckle` / `backseat` / `hype` / `mix`) | `heckle` |
 | `enable_audio` | デスクトップ音声キャプチャ | `false` |
 | `ple_offload` | PLE CPU オフロード（VRAM削減） | `true` |
 | `vision_fp16` | Vision tower を bf16 で保持 | `true` |
 
 詳細は `config.yaml.example` のコメントを参照してください。
 
-## VRAM 使用量の目安
+### VRAM 使用量の目安
 
 | 構成 | ロード時 | 運用時 |
 |------|----------|--------|
-| 4bit + PLE offload + 選択的vision bf16 | ~2.7 GB | ~6.0 GB |
+| 4bit + PLE offload + 選択的vision bf16 | ~2.7 GB | ~5.2 GB |
 | 4bit + PLE offload なし | ~7.2 GB | ~6.0 GB超 |
 
 RTX 4060 Ti (8GB) では `ple_offload: true` + `vision_fp16: true`（選択的ブロック指定）を推奨します。
 
-## アーキテクチャ
+### アーキテクチャ
 
 詳細な設計ドキュメントは `BackseatSimulator_architecture.md` を参照してください。
 
-## 免責事項
+---
+
+## Overview
+
+A desktop overlay application that captures your screen in real-time and generates scrolling danmaku-style comments using a local LLM (Gemma 4). It can also capture desktop audio via WASAPI loopback, generating comments that react to both what's on screen and what's being heard.
+
+### Features
+
+- Real-time active window capture with change detection
+- Comment generation via Gemma 4 E2B (4-bit quantization supported)
+- Danmaku-style scrolling overlay on your desktop
+- Desktop audio capture via WASAPI loopback (Windows)
+- Persona switching (Heckle / Backseat / Hype / Mix)
+- System tray controls (pause, persona change, restart)
+
+### Requirements
+
+- **OS:** Windows 10/11
+- **GPU:** NVIDIA GPU (8GB+ VRAM recommended, tested on RTX 4060 Ti 8GB)
+- **Python:** 3.10+
+- **CUDA:** 12.x
+
+### Setup
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/jiro-prog/backseatSimulator.git
+cd backseatSimulator
+
+# 2. Create a virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# 3. Install PyTorch (match your CUDA version)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Create config file
+copy config.yaml.example config.yaml
+# Edit config.yaml to match your environment
+
+# 6. Launch
+python main.py
+```
+
+The model (~5GB) will be downloaded from HuggingFace on first launch.
+
+After the first run, just double-click `start.bat` to launch.
+
+### Configuration
+
+Copy `config.yaml.example` to `config.yaml` and edit. Key settings:
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `capture_interval` | Capture interval (seconds) | `8` |
+| `model_id` | HuggingFace model ID | `google/gemma-4-E2B-it` |
+| `quantization` | Quantization mode (`4bit` / `8bit` / `none`) | `4bit` |
+| `persona` | Prompt preset (`heckle` / `backseat` / `hype` / `mix`) | `heckle` |
+| `enable_audio` | Desktop audio capture | `false` |
+| `ple_offload` | PLE CPU offload (saves ~4.5GB VRAM) | `true` |
+| `vision_fp16` | Keep vision tower in bf16 | `true` |
+
+See `config.yaml.example` for full documentation.
+
+### VRAM Usage
+
+| Configuration | At Load | Runtime |
+|---------------|---------|---------|
+| 4bit + PLE offload + selective vision bf16 | ~2.7 GB | ~5.2 GB |
+| 4bit without PLE offload | ~7.2 GB | ~6.0 GB+ |
+
+For RTX 4060 Ti (8GB), `ple_offload: true` + `vision_fp16: true` with selective block config is recommended.
+
+### Architecture
+
+See `BackseatSimulator_architecture.md` for detailed design documentation.
+
+---
+
+## Disclaimer
 
 This project is not affiliated with DWANGO Co., Ltd. or Niconico.
 
-## ライセンス
+## License
 
 MIT License
