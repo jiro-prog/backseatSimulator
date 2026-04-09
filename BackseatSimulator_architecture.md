@@ -1,7 +1,7 @@
 # BackseatSimulator
 ## デスクトップオーバーレイアプリケーション
 
-**アーキテクチャ設計書 v2.5**
+**アーキテクチャ設計書 v3.3**
 プラットフォーム: Windows / Python / Gemma 4
 2026年4月9日
 
@@ -237,13 +237,14 @@ BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化
 - 色: **プロンプトでは指定しない**。analyzer側でランダム割り当て
 - レスポンス形式: `{"comments": [{"text": "コメント"}]}`
 
-**ペルソナ (v3.2):**
+**ペルソナ (v3.3):**
 
 | キー | 名称 | max_new_tokens | summary | 特徴 |
 |------|------|---------------|---------|------|
 | **heckle** | ヤジ | 120 | OFF | 辛口ツッコミ。ケチをつけたりツッコんだり |
 | **backseat** | 指示厨 | 150 | ON | 操作に口出し。おせっかいな常連のノリ。方向語・書き言葉禁止 |
 | **hype** | ワイワイ | 120 | OFF | 面白い部分を見つけて盛り上がる。5カテゴリ（共感・驚き・発見・疑問・期待） |
+| **mix** | ミックス | 170 | ON | 3タイプ混在。文字列配列JSON（"盛:コメント"）形式。比率はconfig.yamlのmix_weightsで指定（デフォルト5:3:2）。タイプ別カラー（黄/赤/青） |
 
 
 **ペルソナ設計の原則:**
@@ -255,6 +256,9 @@ BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化
 - 禁止語は「絶対守れ」セクションに集約すると遵守率が高い（A節に分散させると無視される）
 - max_new_tokensはペルソナごとに最適値が異なる。summary生成がある場合は+30tok必要
 - 口調アンカー（語尾の例示）は書き言葉への収束を防ぐのに有効
+- mixモードではJSON形式を文字列配列（`"盛:コメント"`）に簡素化。オブジェクト形式は4-bitモデルでスキーマ不安定+トークン超過を起こす
+- 画面言及指示はsystemプロンプト冒頭に配置すると遵守率が上がる（絶対守れセクションだけでは埋もれる）
+- パース失敗時のフォールバック（前回コメント延命）で無言の間を解消。延命は1回限りで連続延命を防止
 
 **コンテクスト注入 (v3.2):**
 
@@ -474,7 +478,8 @@ config.yaml でカスタマイズ可能:
 | `device_map` | auto | str | auto / cpu / cuda:0 |
 | `max_new_tokens` | 120 | int | 生成トークン上限フォールバック（ペルソナ定義側で上書き可。v3.2: heckle/hype=120, backseat=150） |
 | `visual_token_budget` | 1120 | int | ビジュアルトークン予算（v2.1: vision bf16で高解像度が活きるため140→1120） |
-| `persona` | heckle | str | ペルソナ名（heckle / backseat / hype） |
+| `persona` | heckle | str | ペルソナ名（heckle / backseat / hype / mix） |
+| `mix_weights` | {hype:5,heckle:3,backseat:2} | dict | mixモード時のペルソナ比率 |
 | `ple_offload` | true | bool | PLEテーブルをCPUにオフロード（VRAM ~4.5GB削減）（v1.9新設） |
 | `enable_focus` | false | bool | 動的フォーカス機能の有効/無効（v2.1: budget増でフォーカスクロップの効果が薄れたため暫定false） |
 | `focus_grid` | [3, 3] | list | グリッド分割 [rows, cols] |
@@ -615,4 +620,5 @@ BackseatSimulator/
 | **v2.5** | **2026/04/09** | **ASRプロンプト問題の解決: 5秒バッファでaudio_tower自体はASR可能だがC枠の15文字制限+JSON形式がASR能力を圧殺していたことを特定。C枠を30文字以内+「聞こえた内容への感想コメント」誘導に変更、逐語書き起こしではなく反応コメント（「〜って言ってるw」等）に誘導しニコニコ風に収まる形で解決。audio_towerグリーディ探索: サブプロセス分離方式で全14ブロックを全bf16→段階的4bit化テスト。output_proj(-3MiB, score=1.00)とsubsample_conv(-2MiB, score=1.00)は4bit化可能だが合計-5MiBで設定複雑化に見合わず現状維持。conformer層は1層でも4bit化すると書き起こし変質、3層で幻覚・反復ループ。結論: audio_fp16=true+blocks指定なし（全層bf16）が最適、量子化削減余地なし** |
 | **v3.0** | **2026/04/09** | **公開準備+機能追加。README/config.yaml.example/requirements.txtピン/start.bat新規作成。「ニコニコ動画風」→「弾幕風」表記変更（特許・商標リスク対策）。ペルソナ改修: shijicyuを辛口指示厨化（「名指しして反応+ケチをつける」）、homeをポジティブ方向に再設計。プロンプト否定形→肯定形化（研究に基づく）。repetition_penalty=1.08追加。AudioCapture.stop()未呼び出しバグ修正。デフォルト値を設計書と一致（visual_token_budget 70→1120、max_new_tokens 256→120）。再起動をサイクル完了待ち+DETACHED_PROCESS方式に変更。トレイにキャプチャモード切り替え・音声トグル追加。.state.jsonによる設定永続化。画面変化なし+音声ありで音声のみ推論モード追加（画像トークン節約）。音声あり時のmax_skip_count無効化。鉤括弧strip追加。パース診断ログ（raw→validate→dedup）追加。_parse_response()ユニットテスト18ケース新規。最前面維持タイマー5→2秒** |
 | **v3.1** | **2026/04/09** | **テスト拡充+品質改善。テスト18→56ケース: test_screen_capture.py新規（差分検出・グリッド分割・隣接マージ・スキップ制御 22件）、test_audio_capture.py新規（前処理チェーン全段・循環バッファ 10件）、test_ai_loop.py新規（再起動フラグ・サイクル制御・フレーム間引き 6件）。homeペルソナ改善:「ポジティブに反応」→「面白い部分を見つけて盛り上がれ」にタスク化、A節に5カテゴリ（共感・驚き・発見・疑問・期待）、B節の具体例12個を方向性指示に置換。NG_WORDSに「すごい/すげー/すげえ」追加。エラーハンドリング: AudioCapture音声デバイス消失時の指数バックオフ自動再接続、config.yaml YAMLError catch、.state.jsonキーホワイトリスト化、mssモニター未検出チェック、snapshot_downloadキャッシュ未存在時のフォールバック** |
+| **v3.3** | **2026/04/09** | **mixモード（マルチペルソナ混在コメント欄）。hype/heckle/backseatを1サイクル内で混在させるmixペルソナ追加。文字列配列JSON形式（`"盛:コメント"`）でトークン効率最適化。タイプ別カラーリング（黄=盛/赤=煽/青=指）。overgenerate→post-filterで比率強制（`_apply_mix_ratio`）。パース失敗時の前回コメント延命フォールバック（1回限り）。画面言及率改善（プロンプト冒頭に画面言及指示配置+「汎用的な感想禁止」）。パーサーが文字列要素/commentフィールド/タグ埋め込みの全形式に対応。config.yamlにmix_weights追加。トレイメニューに「ミックス」選択肢追加。実測: raw=8達成率63%、4:2:2比率達成、ペルソナ分離成功（SPP論文の悲観シナリオを超過）** |
 | **v3.2** | **2026/04/09** | **ペルソナ体系再構築+状況要約。3ペルソナ体制: heckle(ヤジ)・backseat(指示厨)・hype(ワイワイ)。キー名をshijicyu→heckle、home→hypeに英語化。backseatは新規ペルソナ（操作への口出し、画面依存タスク設計）。ペルソナごとのmax_new_tokens分離（heckle/hype=120, backseat=150）。backseatのみ状況要約（summary）有効: JSON出力に`summary`フィールド追加、直近3件をsystemプロンプトに注入（画面遷移の文脈提供）。heckle/hypeはsummary無効（120tokのトークン圧迫防止）。backseat「絶対守れ」に方向語禁止（右/左/あっち/こっち）・書き言葉禁止（すべき/である/間違ってる）追加。口調アンカー（しろよ/でよくね/にしとけ）。B節の汎用否定を間引き（は？/なんでだよは最大1個）。起動時わこつを15個プールからランダム5個抽出。NG_WORDS整理: 口出し/指示厨削除、ケチ追加。restart.logによる再起動デバッグ出力追加** |
