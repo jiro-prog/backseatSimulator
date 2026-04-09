@@ -38,7 +38,7 @@
 | ランタイム | Python 3.10+ |
 | LLMバックエンド | HuggingFace Transformers（インプロセス推論） |
 | Visionモデル | **Gemma 4 E2B**（推奨）/ E4B / 26B MoE（VRAMに応じて選択） |
-| GPU | RTX 3060 Ti 8GB（最小構成） |
+| GPU | RTX 4060 Ti 8GB（最小構成） |
 | GUI | PyQt5（透明オーバーレイウィンドウ） |
 | キャプチャ | mss + pywin32（アクティブウィンドウ取得） |
 
@@ -547,7 +547,7 @@ BackseatSimulator/
 
 | モデル | dtype=auto | 4bit量子化 | 4bit + vision bf16 | 4bit + vision&audio bf16 | 備考 |
 |--------|-----------|-----------|-------------------|------------------------|------|
-| E2B | 約6GB | 約3.5GB | 約3.8GB (+302MiB) | **約4.4GB (+884MiB)** | RTX 3060 Ti 8GBで動作 |
+| E2B | 約6GB | 約3.5GB | 約3.8GB (+302MiB) | **約4.4GB (+884MiB)** | RTX 4060 Ti 8GBで動作 |
 | E4B | 約10GB | 約5GB | — | — | 12GB VRAM推奨 |
 
 **v2.4 実測値 (E2B 4bit + 選択的vision bf16 + audio全層bf16, budget=1120):**

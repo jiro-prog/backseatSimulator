@@ -1,9 +1,25 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
-comments.log
-.claude/
-.lock
+.pytest_cache/
+
+# 実行時生成物
+config.yaml
+*.log
 debug_dump/
-launch.log
-test_*.py
+.lock
+
+# テスト成果物（ルート直下のアドホックテスト）
+/test_*.py
+/test_*.txt
+/_parse_log.py
+/_parsed.txt
+/_live.log
+/_live_bf16.log
+
+# IDE / エディタ
+.claude/
+.idea/
+.vscode/
+*.swp

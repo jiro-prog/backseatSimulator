@@ -10,4 +10,4 @@
 
 ## 設計文書
 
-- アーキテクチャ設計書: `BackseatSimulator_architecture_v1.9.md`（プロジェクトルート直下）
+- アーキテクチャ設計書: `BackseatSimulator_architecture.md`（プロジェクトルート直下）
