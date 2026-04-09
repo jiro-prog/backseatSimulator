@@ -22,7 +22,7 @@
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/<your-username>/backseatSimulator.git
+git clone https://github.com/jiro-prog/backseatSimulator.git
 cd backseatSimulator
 
 # 2. 仮想環境を作成
