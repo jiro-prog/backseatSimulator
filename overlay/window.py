@@ -63,10 +63,10 @@ class OverlayWindow(QWidget):
         self.timer.timeout.connect(self._update_frame)
         self.timer.start(16)
 
-        # 最前面維持タイマー（5秒ごと）
+        # 最前面維持タイマー（2秒ごと）
         self._topmost_timer = QTimer(self)
         self._topmost_timer.timeout.connect(self._raise_topmost)
-        self._topmost_timer.start(5000)
+        self._topmost_timer.start(2000)
 
         # キャプチャ除外（自分のコメントがスクリーンショットに映らないようにする）
         self._exclude_from_capture()

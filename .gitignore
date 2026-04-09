@@ -6,6 +6,7 @@ __pycache__/
 
 # 実行時生成物
 config.yaml
+.state.json
 *.log
 debug_dump/
 .lock

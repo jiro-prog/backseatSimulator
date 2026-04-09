@@ -45,6 +45,8 @@ python main.py
 
 初回起動時に HuggingFace からモデル（約5GB）がダウンロードされます。
 
+2回目以降は `start.bat` をダブルクリックするだけで起動できます。
+
 ## 設定
 
 `config.yaml.example` を `config.yaml` にコピーして編集してください。主な設定項目:

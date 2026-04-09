@@ -4,8 +4,13 @@ from PyQt5.QtWidgets import (
 )
 
 PERSONA_LABELS = {
-    "shijicyu": "視聴者",
+    "shijicyu": "指示厨",
     "home": "応援",
+}
+
+CAPTURE_MODE_LABELS = {
+    "active_window": "アクティブウィンドウ",
+    "full_desktop": "全画面",
 }
 
 
@@ -13,12 +18,16 @@ class SystemTray:
     def __init__(self, app: QApplication, config: dict,
                  on_pause: callable, on_resume: callable, on_quit: callable,
                  on_persona_change: callable = None,
+                 on_capture_mode_change: callable = None,
+                 on_audio_toggle: callable = None,
                  on_restart: callable = None):
         self.app = app
         self.is_paused = False
         self.on_pause = on_pause
         self.on_resume = on_resume
         self.on_persona_change = on_persona_change
+        self.on_capture_mode_change = on_capture_mode_change
+        self.on_audio_toggle = on_audio_toggle
         self.on_restart = on_restart
 
         # 簡易アイコン生成（緑の四角）
@@ -57,6 +66,25 @@ class SystemTray:
             persona_menu.addAction(action)
         menu.addMenu(persona_menu)
 
+        # キャプチャモード切替サブメニュー
+        current_capture_mode = config.get("capture_mode", "active_window")
+        capture_menu = QMenu("キャプチャ", menu)
+        capture_group = QActionGroup(capture_menu)
+        capture_group.setExclusive(True)
+        for key, label in CAPTURE_MODE_LABELS.items():
+            action = QAction(label, capture_menu, checkable=True)
+            action.setChecked(key == current_capture_mode)
+            action.triggered.connect(lambda checked, k=key: self._change_capture_mode(k))
+            capture_group.addAction(action)
+            capture_menu.addAction(action)
+        menu.addMenu(capture_menu)
+
+        # 音声キャプチャ トグル
+        self.audio_action = QAction("音声キャプチャ", menu, checkable=True)
+        self.audio_action.setChecked(config.get("enable_audio", False))
+        self.audio_action.triggered.connect(self._toggle_audio)
+        menu.addAction(self.audio_action)
+
         menu.addSeparator()
 
         restart_action = QAction("再起動", menu)
@@ -83,6 +111,14 @@ class SystemTray:
     def _restart(self):
         if self.on_restart:
             self.on_restart()
+
+    def _change_capture_mode(self, mode: str):
+        if self.on_capture_mode_change:
+            self.on_capture_mode_change(mode)
+
+    def _toggle_audio(self, checked: bool):
+        if self.on_audio_toggle:
+            self.on_audio_toggle(checked)
 
     def _change_persona(self, key: str):
         if self.on_persona_change:
