@@ -54,9 +54,9 @@
 [Screen Capture]  ── image ──>  [AI Analyzer]  ── comment ──>  [Comment Queue]  ──>  [Overlay Renderer]
    (mss+win32)      image_queue   (Transformers)  comment_queue  (queue.Queue)     drip    (PyQt5 Window)
        |                |                                                               |
-   グリッド差分       ウィンドウタイトル注入                                       pending残量
-   フォーカスクロップ  vision_tower bf16差し替え                                   動的間隔制御
-   ウィンドウタイトル                                                              _raise_topmost(5秒)
+   差分検知           ウィンドウタイトル注入                                       pending残量
+   ウィンドウタイトル  vision_tower bf16差し替え                                   動的間隔制御
+                                                                                   _raise_topmost(2秒)
 
 [Audio Capture]  ── get_audio() ──>  (AI Analyzerが画像取得時に音声スナップショットも取得)
   (pyaudiowpatch      循環バッファ
@@ -68,7 +68,7 @@
 
 | # | ステップ | データ | 説明 |
 |---|----------|--------|------|
-| 1 | Screen Capture | PNG (base64) x 1-2枚 | アクティブウィンドウをキャプチャ。グリッド差分で変化領域を検出し、全体画像+フォーカスクロップを生成。ウィンドウタイトルも取得。 |
+| 1 | Screen Capture | PNG (base64) x 1枚 | アクティブウィンドウをキャプチャ。差分検知で変化を検出。ウィンドウタイトルも取得。 |
 | 1.5 | Audio Capture | numpy float32 | WASAPI loopbackでデスクトップ音声を常時キャプチャ。AI分析時に直近N秒のスナップショットを16kHz monoで取得。無音時はスキップ。 |
 | 2 | AI Analysis | JSON | Transformersでインプロセス推論。画像+音声をchat templateで入力を構築。ウィンドウタイトルをsystemプロンプトに注入。 |
 | 3 | Filter | list[dict] | 重複フィルター（deque直近100件）+ 先頭一致重複判定 + NGワードフィルター + ゴミフィルター。色をanalyzer側で割り当て。 |
@@ -92,12 +92,6 @@
 - 前回キャプチャとの差分を**256pxに縮小した画像**でnumpy比較（高速化）
 - 差分が閾値（0.05）未満の場合はスキップ
 - **ただし `max_skip_count`（デフォルト4）回連続スキップしたら強制キャプチャ**
-
-**動的フォーカス (v1.4):**
-- 画面を3x3グリッドに分割し、セル単位でdiff値を計算
-- 変化が最も大きいセルを切り出し、640pxにリサイズしてフォーカスクロップとして生成
-- 均等変化判定: UNIFORM_DIFF_RATIO=0.85。画面全体が同時に変わった場合はフォーカスなし
-- full_image + focus_image の2枚をLLMに渡す（focus時はvisual_token_budgetを自動2倍）
 
 **ウィンドウタイトル取得 (v1.7):**
 - win32gui.GetForegroundWindow() + GetWindowText() でアクティブウィンドウのタイトルを取得
@@ -223,7 +217,7 @@ BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化
 |-------------|------|------|
 | 140 | 最速 | テキスト読み取りも含めバランスが良い。 |
 | 280 | 高速 | 細かい画面要素の認識。 |
-| **1120** | 普通 | **実運用推奨 (v2.1)** vision bf16化で高解像度が活きる。focus時は自動2240。 |
+| **1120** | 普通 | **実運用推奨 (v2.1)** vision bf16化で高解像度が活きる。 |
 
 > **注:** vision_tower bf16化により高解像度トークンの恩恵が劇的に改善。v1.9の140では情報を捨てすぎていた。
 
@@ -244,7 +238,7 @@ BitsAndBytes 4bit量子化はvision_tower/audio_tower内のLinear層も量子化
 | **heckle** | ヤジ | 120 | OFF | 辛口ツッコミ。ケチをつけたりツッコんだり |
 | **backseat** | 指示厨 | 150 | ON | 操作に口出し。おせっかいな常連のノリ。方向語・書き言葉禁止 |
 | **hype** | ワイワイ | 120 | OFF | 面白い部分を見つけて盛り上がる。5カテゴリ（共感・驚き・発見・疑問・期待） |
-| **mix** ⚠β | ミックス | 170 | ON | 3タイプ混在（β版）。煽のみ赤、他は白。88%がdict形式出力→パーサーで展開。avg 3.2コメント/cycle。煽でヤバ/マジ禁止で語彙分離 |
+| **mix** ⚠β | ミックス | 140 | OFF | 2タイプ混在（β版）。煽のみ赤、他は白。88%がdict形式出力→パーサーで展開。avg 3.2コメント/cycle。煽でヤバ/マジ禁止で語彙分離 |
 
 
 **ペルソナ設計の原則:**
@@ -280,16 +274,14 @@ systemプロンプトに以下を動的に追加:
 
 **userプロンプト連結方式 (v1.9+):**
 
-ペルソナごとにfocus有無×audio有無の4パターンを持つとスケールしない。ベース文に条件付きsuffixを連結する方式を採用:
+audio有無でペルソナごとに2パターンを持つとスケールしない。ベース文に条件付きsuffixを連結する方式を採用:
 
 ```python
-FOCUS_SUFFIX = "2枚目は注目部分のズーム。そこに見えるものに具体的に触れろ。"
 AUDIO_SUFFIX = "音声も聞こえている。会話が聞こえたら内容に反応しろ。"
 AUDIO_SYSTEM_SUFFIX = "\nC. 聞こえた会話への反応（1個まで、30文字以内）:\n   聞こえた話の内容を踏まえた感想を書け。「〜って言ってるw」「〜は草」のような反応\n   逐語書き起こし禁止。聞こえた内容への短いツッコミや感想にしろ\n   BGMだけ・無音ならこの枠は不要"
 # audio有りの時のみsystemプロンプトに動的注入（analyzer.py）
 
-user_prompt = persona["user"]                          # ベース: "この画面にニコニコ風コメントして。短く、説明なし。"
-if pil_focus:  user_prompt += FOCUS_SUFFIX             # + focus
+user_prompt = persona["user"]                          # ベース: "この画面にコメントしろ。短く。"
 if audio_data: user_prompt += AUDIO_SUFFIX             # + audio
 ```
 
@@ -305,8 +297,6 @@ messages = [
         "role": "user",
         "content": [
             {"type": "image", "image": pil_full_image},
-            # focus_image があれば:
-            # {"type": "image", "image": pil_focus_image},
             # audio_data があれば:
             # {"type": "audio", "audio": numpy_array_16khz},
             {"type": "text", "text": "この画面にニコニコ風コメントして。短く、説明なし。"}
@@ -402,7 +392,7 @@ Ollama の `format: "json"` がなくなったことへの対応:
 | Tool flag (Windows) | タスクバーに非表示 |
 
 **最前面維持 (v2.1):**
-- `_raise_topmost` タイマー: 5秒ごとにWin32 `SetWindowPos(HWND_TOPMOST)` で最前面を再設定
+- `_raise_topmost` タイマー: 2秒ごとにWin32 `SetWindowPos(HWND_TOPMOST)` で最前面を再設定
 - `SWP_NOACTIVATE` フラグでフォーカスを奪わない
 - 他のアプリが最前面を奪った場合でもオーバーレイが自動復帰
 
@@ -454,7 +444,7 @@ pending残量ベースの動的間隔制御:
 | スレッド | タイプ | 役割 |
 |----------|--------|------|
 | Main Thread | GUI (PyQt5) | PyQt5イベントループ。オーバーレイ描画とシステムトレイ。QTimerでcomment_queueをポーリング+ドリップ制御。 |
-| Capture Thread | daemon | capture_interval秒ごとにキャプチャ。グリッド差分検知+フォーカスクロップ+ウィンドウタイトル取得。image_queueにput()。 |
+| Capture Thread | daemon | capture_interval秒ごとにキャプチャ。差分検知+ウィンドウタイトル取得。image_queueにput()。 |
 | AI Thread | daemon | image_queueからget()。音声スナップショット取得。ウィンドウタイトル注入+コメント生成+フィルター+色付与。comment_queueにput()。推論後に滞留フレームをスキップ。コメント≤1個の場合はcapture_interval分追加待機（v2.3）。 |
 | Audio Thread (v1.9+) | daemon | enable_audio: true時のみ起動。pyaudiowpatchでWASAPI loopback音声を循環バッファに常時記録。AI Threadがget_audio()で読み出し。 |
 
@@ -482,11 +472,7 @@ config.yaml でカスタマイズ可能:
 | `persona` | heckle | str | ペルソナ名（heckle / backseat / hype / mix） |
 | `mix_weights` | {hype:5,heckle:3,backseat:2} | dict | mixモード時のペルソナ比率 |
 | `ple_offload` | true | bool | PLEテーブルをCPUにオフロード（VRAM ~4.5GB削減）（v1.9新設） |
-| `enable_focus` | false | bool | 動的フォーカス機能の有効/無効（v2.1: budget増でフォーカスクロップの効果が薄れたため暫定false） |
-| `focus_grid` | [3, 3] | list | グリッド分割 [rows, cols] |
-| `focus_diff_threshold` | 0.10 | float | フォーカス対象とするdiff閾値 |
-| `focus_crop_size` | 640 | int (px) | クロップ画像の長辺 |
-| `enable_audio` | true | bool | デスクトップ音声キャプチャの有効/無効（v2.3でデフォルトtrue化） |
+| `enable_audio` | false | bool | デスクトップ音声キャプチャの有効/無効 |
 | `audio_buffer_seconds` | 5 | int (sec) | 音声ローリングバッファ長（v2.3: 10→5秒に短縮。音声トークン削減でコメント数改善） |
 | `audio_device` | null | str/int | 音声デバイス（null=デフォルト出力のloopback自動検出） |
 | `audio_silence_threshold` | 0.001 | float | 無音判定RMS閾値 |
@@ -498,7 +484,7 @@ config.yaml でカスタマイズ可能:
 | `vision_fp16_blocks` | (list) | list/null | bf16差し替え対象ブロック。null=全層（v2.4新設） |
 | `audio_fp16` | true | bool | audio_tower bf16差し替えの有効/無効（v2.2新設。+~582MiB VRAM） |
 | `audio_fp16_blocks` | null | list/null | bf16差し替え対象ブロック。null=全層（v2.4新設） |
-| `debug_dump` | true | bool | デバッグダンプの有効/無効（v2.1新設。2サイクル目にdebug_dump/へ保存） |
+| `debug_dump` | false | bool | デバッグダンプの有効/無効（v2.1新設。2サイクル目にdebug_dump/へ保存） |
 | `font_size` | 36 | int | コメントのフォントサイズ |
 | `scroll_speed` | 3.0 | float | コメントの流れる速度 (px/frame) |
 | `max_comments` | 20 | int | 同時表示コメント数の上限 |
@@ -529,15 +515,14 @@ BackseatSimulator/
 ├── main.py              # エントリポイント（環境変数設定+モデルロード+3スレッド統合+コメントログ+再起動+デバッグダンプ）
 ├── config.yaml          # 設定ファイル
 ├── requirements.txt     # 依存ライブラリ
-├── comments.log         # コメント履歴（自動生成、window/focus情報付き）
+├── comments.log         # コメント履歴（自動生成）
 ├── debug_dump/          # デバッグダンプ出力先（debug_dump: true時、2サイクル目に生成）
 │   ├── full.png         # 全体キャプチャ画像
-│   ├── focus.png        # フォーカスクロップ画像
 │   ├── audio.wav        # 音声スナップショット
 │   └── prompt.txt       # LLMに渡したプロンプト全文
 ├── capture/
 │   ├── __init__.py
-│   ├── screen.py       # キャプチャ + 差分検知 + グリッドフォーカス + ウィンドウタイトル取得
+│   ├── screen.py       # キャプチャ + 差分検知 + ウィンドウタイトル取得
 │   └── audio.py        # デスクトップ音声キャプチャ (WASAPI loopback + 循環バッファ)
 ├── ai/
 │   ├── __init__.py
@@ -596,7 +581,6 @@ BackseatSimulator/
 | 3 | 応援ペルソナのバリエーション | 構造的制約 | 「褒める」は画面内容から切り口を見つけにくい。ネガティブ禁止+B節応援辞書で実用的な品質 |
 | 4 | JSON出力の安定性 | 要監視 | プロンプト指示+パースフォールバックに依存。thinkingタグ混入の可能性あり |
 | 5 | 音声認識の精度限界 | 改善（v2.2） | audio_tower bf16化で楽器識別・ムード把握・歌詞断片の認識が可能に。ただし完全なASR（正確な書き起こし）には至らず、日本語歌詞は空耳レベル。英語歌詞は断片的に拾える |
-| 6 | enable_focusの暫定無効化 | 要再検討 | budget=1120でフォーカスクロップの効果が薄れたため暫定false。特定ユースケースで再有効化の余地あり |
 
 ---
 
@@ -621,5 +605,5 @@ BackseatSimulator/
 | **v2.5** | **2026/04/09** | **ASRプロンプト問題の解決: 5秒バッファでaudio_tower自体はASR可能だがC枠の15文字制限+JSON形式がASR能力を圧殺していたことを特定。C枠を30文字以内+「聞こえた内容への感想コメント」誘導に変更、逐語書き起こしではなく反応コメント（「〜って言ってるw」等）に誘導しニコニコ風に収まる形で解決。audio_towerグリーディ探索: サブプロセス分離方式で全14ブロックを全bf16→段階的4bit化テスト。output_proj(-3MiB, score=1.00)とsubsample_conv(-2MiB, score=1.00)は4bit化可能だが合計-5MiBで設定複雑化に見合わず現状維持。conformer層は1層でも4bit化すると書き起こし変質、3層で幻覚・反復ループ。結論: audio_fp16=true+blocks指定なし（全層bf16）が最適、量子化削減余地なし** |
 | **v3.0** | **2026/04/09** | **公開準備+機能追加。README/config.yaml.example/requirements.txtピン/start.bat新規作成。「ニコニコ動画風」→「弾幕風」表記変更（特許・商標リスク対策）。ペルソナ改修: shijicyuを辛口指示厨化（「名指しして反応+ケチをつける」）、homeをポジティブ方向に再設計。プロンプト否定形→肯定形化（研究に基づく）。repetition_penalty=1.08追加。AudioCapture.stop()未呼び出しバグ修正。デフォルト値を設計書と一致（visual_token_budget 70→1120、max_new_tokens 256→120）。再起動をサイクル完了待ち+DETACHED_PROCESS方式に変更。トレイにキャプチャモード切り替え・音声トグル追加。.state.jsonによる設定永続化。画面変化なし+音声ありで音声のみ推論モード追加（画像トークン節約）。音声あり時のmax_skip_count無効化。鉤括弧strip追加。パース診断ログ（raw→validate→dedup）追加。_parse_response()ユニットテスト18ケース新規。最前面維持タイマー5→2秒** |
 | **v3.1** | **2026/04/09** | **テスト拡充+品質改善。テスト18→56ケース: test_screen_capture.py新規（差分検出・グリッド分割・隣接マージ・スキップ制御 22件）、test_audio_capture.py新規（前処理チェーン全段・循環バッファ 10件）、test_ai_loop.py新規（再起動フラグ・サイクル制御・フレーム間引き 6件）。homeペルソナ改善:「ポジティブに反応」→「面白い部分を見つけて盛り上がれ」にタスク化、A節に5カテゴリ（共感・驚き・発見・疑問・期待）、B節の具体例12個を方向性指示に置換。NG_WORDSに「すごい/すげー/すげえ」追加。エラーハンドリング: AudioCapture音声デバイス消失時の指数バックオフ自動再接続、config.yaml YAMLError catch、.state.jsonキーホワイトリスト化、mssモニター未検出チェック、snapshot_downloadキャッシュ未存在時のフォールバック** |
-| **v3.3** | **2026/04/09** | **mixモード β版（マルチペルソナ混在コメント欄）。hype/heckle/backseatを1サイクル内で混在。カラー: 煽のみ赤、他は白。88%がdict形式出力→パーサーでdict展開して吸収。avg 3.2コメント/cycle、usable 97%。語彙分離: 煽でヤバ/マジ禁止（煽ヤバ0%）。フォールバック延命に`_recent_texts`重複フィルタ追加。パーサーがstring配列/dict形式/commentフィールド/タグ埋め込みの全形式に対応。鉤括弧除去をstrip→replace化。チューニング知見: 4-bit Gemmaはdict形式に強いバイアス、形式変更はハイリスク、禁止ルールが語彙分離に有効、冒頭パターン/エグゼンプラは無効** |
 | **v3.2** | **2026/04/09** | **ペルソナ体系再構築+状況要約。3ペルソナ体制: heckle(ヤジ)・backseat(指示厨)・hype(ワイワイ)。キー名をshijicyu→heckle、home→hypeに英語化。backseatは新規ペルソナ（操作への口出し、画面依存タスク設計）。ペルソナごとのmax_new_tokens分離（heckle/hype=120, backseat=150）。backseatのみ状況要約（summary）有効: JSON出力に`summary`フィールド追加、直近3件をsystemプロンプトに注入（画面遷移の文脈提供）。heckle/hypeはsummary無効（120tokのトークン圧迫防止）。backseat「絶対守れ」に方向語禁止（右/左/あっち/こっち）・書き言葉禁止（すべき/である/間違ってる）追加。口調アンカー（しろよ/でよくね/にしとけ）。B節の汎用否定を間引き（は？/なんでだよは最大1個）。起動時わこつを15個プールからランダム5個抽出。NG_WORDS整理: 口出し/指示厨削除、ケチ追加。restart.logによる再起動デバッグ出力追加** |
+| **v3.3** | **2026/04/09** | **mixモード β版（マルチペルソナ混在コメント欄）。hype/heckle/backseatを1サイクル内で混在。カラー: 煽のみ赤、他は白。88%がdict形式出力→パーサーでdict展開して吸収。avg 3.2コメント/cycle、usable 97%。語彙分離: 煽でヤバ/マジ禁止（煽ヤバ0%）。フォールバック延命に`_recent_texts`重複フィルタ追加。パーサーがstring配列/dict形式/commentフィールド/タグ埋め込みの全形式に対応。鉤括弧除去をstrip→replace化。チューニング知見: 4-bit Gemmaはdict形式に強いバイアス、形式変更はハイリスク、禁止ルールが語彙分離に有効、冒頭パターン/エグゼンプラは無効** |

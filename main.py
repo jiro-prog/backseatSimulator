@@ -30,47 +30,39 @@ def capture_loop(screen_capture: ScreenCapture, image_queue: queue.Queue,
                  audio_state: dict = None):
     """キャプチャスレッド: 一定間隔でスクリーンショットを取得。"""
     interval = config.get("capture_interval", 15)
-    enable_focus = config.get("enable_focus", True)
     while True:
         if not pause_event.is_set():
             try:
-                if enable_focus:
-                    result = screen_capture.capture_with_focus()
+                # 音声ありなら強制キャプチャを抑制（音声のみモードに任せる）
+                audio_available = (audio_state and audio_state["enabled"]
+                                   and audio_state["capture"] is not None)
+                if audio_available:
+                    screen_capture.max_skip_count = 999
                 else:
-                    # 音声ありなら強制キャプチャを抑制（音声のみモードに任せる）
-                    audio_available = (audio_state and audio_state["enabled"]
-                                       and audio_state["capture"] is not None)
-                    if audio_available:
-                        screen_capture.max_skip_count = 999
-                    else:
-                        screen_capture.max_skip_count = config.get("max_skip_count", 4)
+                    screen_capture.max_skip_count = config.get("max_skip_count", 4)
 
-                    img = screen_capture.capture()
-                    if img:
-                        result = {"full_image": img, "focus_image": None,
-                                  "focus_label": None, "focus_diff": 0.0,
-                                  "screen_changed": True,
-                                  "window_title": screen_capture._get_window_title()}
-                    else:
-                        # 画面変化なし — 音声のみ処理用
-                        result = {"full_image": None, "focus_image": None,
-                                  "focus_label": None, "focus_diff": 0.0,
-                                  "screen_changed": False,
-                                  "window_title": screen_capture._get_window_title()}
+                img = screen_capture.capture()
+                if img:
+                    result = {"full_image": img,
+                              "screen_changed": True,
+                              "window_title": screen_capture._get_window_title()}
+                else:
+                    # 画面変化なし — 音声のみ処理用
+                    result = {"full_image": None,
+                              "screen_changed": False,
+                              "window_title": screen_capture._get_window_title()}
 
-                if result is not None:
-                    # 古い画像を捨てて最新のみ保持
-                    while not image_queue.empty():
-                        try:
-                            image_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    image_queue.put(result)
-                    if result.get("screen_changed", True):
-                        logger.info("キャプチャ完了、AI分析キューに追加 (focus=%s)",
-                                    result.get("focus_label"))
-                    else:
-                        logger.info("画面変化なし、音声のみキューに追加")
+                # 古い画像を捨てて最新のみ保持
+                while not image_queue.empty():
+                    try:
+                        image_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                image_queue.put(result)
+                if result["screen_changed"]:
+                    logger.info("キャプチャ完了、AI分析キューに追加")
+                else:
+                    logger.info("画面変化なし、音声のみキューに追加")
             except Exception:
                 logger.exception("キャプチャスレッドでエラー")
         time.sleep(interval)
@@ -116,7 +108,6 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
 
             comments = ai_analyzer.analyze(
                 full_image=data["full_image"],
-                focus_image=data.get("focus_image"),
                 window_title=data.get("window_title", ""),
                 audio_data=audio_data,
             )
@@ -126,12 +117,10 @@ def ai_loop(ai_analyzer: AIAnalyzer, image_queue: queue.Queue,
                 # コメントログをファイルに記録
                 try:
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    focus_info = data.get("focus_label") or "-"
-                    focus_diff = data.get("focus_diff", 0.0)
                     win_title = data.get("window_title", "")
                     audio_info = f"{len(audio_data)/16000:.1f}s" if audio_data is not None else "-"
                     with open("comments.log", "a", encoding="utf-8") as f:
-                        f.write(f"[{now}] focus={focus_info} diff={focus_diff:.3f} window={win_title} audio={audio_info}\n")
+                        f.write(f"[{now}] window={win_title} audio={audio_info}\n")
                         for c in comments:
                             f.write(f"[{now}]   {c.get('text', '')}  (color: {c.get('color', '')})\n")
                 except Exception:

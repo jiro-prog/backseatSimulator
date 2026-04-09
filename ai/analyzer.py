@@ -13,7 +13,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
-from ai.prompts import (AUDIO_SUFFIX, AUDIO_SYSTEM_SUFFIX, FOCUS_SUFFIX,
+from ai.prompts import (AUDIO_SUFFIX, AUDIO_SYSTEM_SUFFIX,
                         MIX_TYPE_INFO, PERSONAS, PREV_SUMMARY_TEMPLATE,
                         WINDOW_TITLE_TEMPLATE)
 
@@ -253,7 +253,7 @@ class AIAnalyzer:
                                              {"hype": 5, "heckle": 3, "backseat": 2})
         self._debug_dump_countdown: int = 2 if config.get("debug_dump", False) else 0
 
-    def analyze(self, full_image: str, focus_image: str | None = None,
+    def analyze(self, full_image: str,
                 window_title: str = "",
                 audio_data: "np.ndarray | None" = None) -> list[dict]:
         """Transformersでインプロセス推論し、コメントリストを返す。"""
@@ -261,16 +261,13 @@ class AIAnalyzer:
 
         # base64 → PIL.Image 変換
         pil_full = self._b64_to_pil(full_image) if full_image else None
-        pil_focus = self._b64_to_pil(focus_image) if focus_image else None
 
-        # userプロンプト連結方式（ベース + focus + audio）
+        # userプロンプト連結方式（ベース + audio）
         if pil_full is None and audio_data is not None:
             # 画面変化なし＋音声あり → 音声専用プロンプト
             user_prompt = AUDIO_SUFFIX
         else:
             user_prompt = persona["user"]
-            if pil_focus:
-                user_prompt = user_prompt.rstrip("。") + "。" + FOCUS_SUFFIX
             if audio_data is not None:
                 user_prompt = user_prompt.rstrip("。") + "。" + AUDIO_SUFFIX
 
@@ -291,8 +288,6 @@ class AIAnalyzer:
         user_content = []
         if pil_full is not None:
             user_content.append({"type": "image", "image": pil_full})
-        if pil_focus:
-            user_content.append({"type": "image", "image": pil_focus})
         if audio_data is not None:
             user_content.append({"type": "audio", "audio": audio_data})
         user_content.append({"type": "text", "text": user_prompt})
@@ -306,14 +301,13 @@ class AIAnalyzer:
         if self._debug_dump_countdown > 0:
             self._debug_dump_countdown -= 1
             if self._debug_dump_countdown == 0:
-                self._save_debug_dump(pil_full, pil_focus, audio_data,
+                self._save_debug_dump(pil_full, audio_data,
                                       system_prompt, user_prompt)
 
         # visual_token_budget の適用（画像なしなら設定不要）
         if pil_full is not None:
-            token_budget = self.visual_token_budget * 2 if pil_focus else self.visual_token_budget
-            self.processor.image_processor.image_seq_length = token_budget
-            self.processor.image_processor.max_soft_tokens = token_budget
+            self.processor.image_processor.image_seq_length = self.visual_token_budget
+            self.processor.image_processor.max_soft_tokens = self.visual_token_budget
 
         try:
             inputs = self.processor.apply_chat_template(
@@ -527,15 +521,13 @@ class AIAnalyzer:
             pass
         return None
 
-    def _save_debug_dump(self, pil_full, pil_focus, audio_data,
+    def _save_debug_dump(self, pil_full, audio_data,
                           system_prompt, user_prompt):
         """推論に渡すデータをdebug_dump/ディレクトリに保存する。"""
         dump_dir = "debug_dump"
         os.makedirs(dump_dir, exist_ok=True)
         try:
             pil_full.save(os.path.join(dump_dir, "full.png"))
-            if pil_focus is not None:
-                pil_focus.save(os.path.join(dump_dir, "focus.png"))
             if audio_data is not None:
                 wav_path = os.path.join(dump_dir, "audio.wav")
                 audio_int16 = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)

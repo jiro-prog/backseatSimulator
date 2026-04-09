@@ -46,9 +46,6 @@ def make_data(screen_changed=True, full_image="dummybase64"):
     """ai_loop用のキューアイテムを生成。"""
     return {
         "full_image": full_image if screen_changed else None,
-        "focus_image": None,
-        "focus_label": None,
-        "focus_diff": 0.0,
         "screen_changed": screen_changed,
         "window_title": "TestWindow",
     }

@@ -16,7 +16,8 @@ class Comment:
 
     def is_offscreen(self) -> bool:
         """画面左端を超えたか判定（テキスト幅分の余裕を持たせる）"""
-        return self.x_pos < -(len(self.text) * self.font_size)
+        w = self.text_width if self.text_width > 0 else len(self.text) * self.font_size
+        return self.x_pos < -w
 
     def update(self):
         """x_posをspeed分だけ減算"""
