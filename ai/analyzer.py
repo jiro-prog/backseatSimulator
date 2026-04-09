@@ -228,8 +228,8 @@ class AIAnalyzer:
         self.processor = processor
         self.config = config
         self.persona = config.get("persona", "shijicyu")
-        self.visual_token_budget = config.get("visual_token_budget", 70)
-        self.max_new_tokens = config.get("max_new_tokens", 256)
+        self.visual_token_budget = config.get("visual_token_budget", 1120)
+        self.max_new_tokens = config.get("max_new_tokens", 120)
         self._recent_texts: collections.deque = collections.deque(maxlen=100)
         self._prev_window_title: str = ""
         self._debug_dump_countdown: int = 2 if config.get("debug_dump", False) else 0

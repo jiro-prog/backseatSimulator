@@ -212,6 +212,8 @@ def main():
 
     def restart():
         logger.info("再起動します...")
+        if audio_capture is not None:
+            audio_capture.stop()
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     tray = SystemTray(
@@ -219,7 +221,7 @@ def main():
         config=config,
         on_pause=lambda: pause_event.set(),
         on_resume=resume,
-        on_quit=app.quit,
+        on_quit=lambda: (audio_capture.stop() if audio_capture else None, app.quit()),
         on_persona_change=change_persona,
         on_restart=restart,
     )
