@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 COLORS_ACCENT = ["#FF4444", "#44FF44", "#FFFF00", "#FF69B4", "#87CEEB"]
 # mixモード: タイプ別カラー
 MIX_TYPE_COLORS = {
-    "盛": "#FFFF00",   # yellow (hype)
+    "盛": "#FFFFFF",   # white (hype)
     "煽": "#FF4444",   # red (heckle)
-    "指": "#87CEEB",   # sky blue (backseat)
+    "指": "#FFFFFF",   # white (backseat)
 }
 # タグ文字 → configキー
 _TAG_TO_KEY = {tag: key for key, (tag, _) in MIX_TYPE_INFO.items()}
@@ -359,12 +359,17 @@ class AIAnalyzer:
                 logger.info("状況要約: %s", summary)
         if window_title:
             self._prev_window_title = window_title
-        # フォールバック: パース失敗時に前回コメントを延命
+        # フォールバック: パース失敗時に前回コメントを延命（重複除去付き）
         if not comments and self._last_good_comments:
-            logger.info("パース失敗、前回コメント延命 (%d個)", len(self._last_good_comments))
-            fallback = list(self._last_good_comments)
+            fallback = [c for c in self._last_good_comments
+                        if c["text"] not in self._recent_texts]
             self._last_good_comments = []  # 延命は1回限り
-            return fallback
+            if fallback:
+                for c in fallback:
+                    self._recent_texts.append(c["text"])
+                logger.info("パース失敗、前回コメント延命 (%d個)", len(fallback))
+                return fallback
+            logger.info("パース失敗、延命候補も重複のため破棄")
         if comments:
             self._last_good_comments = comments
         return comments
@@ -426,6 +431,22 @@ class AIAnalyzer:
                 for m in matches:
                     comments.append(m)  # 文字列としてcommentsに追加
 
+        # dict形式のコメント展開: [{"盛": "text", "煽": "text"}] → ["盛:text", "煽:text"]
+        expanded = []
+        did_expand = False
+        for c in comments:
+            if isinstance(c, dict) and not c.get("text") and not c.get("comment"):
+                tag_items = [(k, v) for k, v in c.items()
+                             if k in _TAG_TO_KEY and isinstance(v, str)]
+                if tag_items:
+                    for k, v in tag_items:
+                        expanded.append(f"{k}:{v}")
+                    did_expand = True
+                    continue
+            expanded.append(c)
+        if did_expand:
+            comments = expanded
+
         # バリデーションとサニタイズ
         result = []
         seen_texts = set()
@@ -451,7 +472,7 @@ class AIAnalyzer:
                         text = rest.strip()
             else:
                 continue
-            text = text.strip("「」")
+            text = text.replace("「", "").replace("」", "")
             if not text:
                 continue
             if len(text) > 30:

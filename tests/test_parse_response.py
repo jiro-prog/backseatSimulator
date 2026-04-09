@@ -80,6 +80,29 @@ class TestJsonParsing:
         result = make_analyzer()._parse_response(raw)
         assert texts(result) == ["なるほど"]
 
+    def test_mix_dict_format(self):
+        """mixモードのdict形式 {"盛": "text", "煽": "text"} が展開される。"""
+        raw = json.dumps({"comments": [
+            {"盛": "きたきた！", "煽": "雑すぎだろ", "指": "もっと丁寧にやれ"}
+        ]})
+        result = make_analyzer()._parse_response(raw)
+        assert len(result) == 3
+        result_texts = texts(result)
+        assert "きたきた！" in result_texts
+        assert "雑すぎだろ" in result_texts
+        assert "もっと丁寧にやれ" in result_texts
+
+    def test_mix_dict_format_multiple(self):
+        """dict形式が複数要素の配列で来るケース。"""
+        raw = json.dumps({"comments": [
+            {"盛": "うおお"},
+            {"煽": "は？"},
+            {"指": "やめとけ"},
+        ]})
+        result = make_analyzer()._parse_response(raw)
+        assert len(result) == 3
+        assert texts(result) == ["うおお", "は？", "やめとけ"]
+
     def test_thinking_tags_removed(self):
         """thinking タグが除去されて本体がパースされる。"""
         inner = json.dumps({"comments": [{"text": "ほう"}]})

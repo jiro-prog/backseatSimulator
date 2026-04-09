@@ -12,7 +12,7 @@ model_id: "google/gemma-4-E2B-it"   # HuggingFace モデルID
 quantization: "4bit"                 # auto | 4bit | 8bit | none
 device_map: "cuda:0"                 # auto | cpu | cuda:0
 max_new_tokens: 120                  # 生成トークン上限（ペルソナ側で上書き可）
-persona: "heckle"                      # プロンプトプリセット名 (heckle / backseat / hype / mix)
+persona: "mix"                         # プロンプトプリセット名 (heckle / backseat / hype / mix)
 mix_weights:                             # mixモード時のペルソナ比率
   hype: 5
   heckle: 3
