@@ -37,11 +37,10 @@ class OverlayWindow(QWidget):
         self._last_batch_time: float = 0.0
 
         # ウィンドウ属性
-        self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Tool  # タスクバー非表示
-        )
+        flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        if config.get("hide_from_taskbar", True):
+            flags |= Qt.Tool  # タスクバー・ウィンドウ一覧から非表示
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
@@ -68,8 +67,9 @@ class OverlayWindow(QWidget):
         self._topmost_timer.timeout.connect(self._raise_topmost)
         self._topmost_timer.start(2000)
 
-        # キャプチャ除外（自分のコメントがスクリーンショットに映らないようにする）
-        self._exclude_from_capture()
+        # キャプチャ除外（WGC使用時は不要。mssフォールバック時のみ有効化）
+        if config.get("exclude_from_capture", False):
+            self._exclude_from_capture()
 
         # 起動時の挨拶コメント（プールから5個ランダム抽出）
         _GREETING_POOL = [

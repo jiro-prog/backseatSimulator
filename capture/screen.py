@@ -1,6 +1,7 @@
 import base64
 import io
 import logging
+import threading
 
 import mss
 import numpy as np
@@ -10,6 +11,12 @@ try:
     import win32gui
 except ImportError:
     win32gui = None
+
+try:
+    from windows_capture import WindowsCapture, Frame, InternalCaptureControl
+    _wgc_available = True
+except ImportError:
+    _wgc_available = False
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +92,16 @@ class ScreenCapture:
     def _grab_active_window(self) -> Image.Image:
         try:
             hwnd = win32gui.GetForegroundWindow()
+            title = win32gui.GetWindowText(hwnd) or ""
+
+            # WGC: ウィンドウ単体をキャプチャ（他ウィンドウの被りなし）
+            if _wgc_available and title:
+                img = self._grab_wgc(title)
+                if img is not None:
+                    return img
+                logger.debug("WGCキャプチャ失敗、mssにフォールバック")
+
+            # mss フォールバック: 矩形領域の合成後画像
             rect = win32gui.GetWindowRect(hwnd)
             left, top, right, bottom = rect
             width = right - left
@@ -101,6 +118,38 @@ class ScreenCapture:
         except Exception:
             logger.warning("アクティブウィンドウ取得失敗、フルデスクトップにフォールバック", exc_info=True)
             return self._grab_full_desktop()
+
+    @staticmethod
+    def _grab_wgc(window_title: str, timeout: float = 3.0) -> Image.Image | None:
+        """Windows Graphics Capture でウィンドウ単体をキャプチャする。"""
+        result = {}
+        event = threading.Event()
+
+        capture = WindowsCapture(
+            cursor_capture=False,
+            draw_border=False,
+            window_name=window_title,
+        )
+
+        @capture.event
+        def on_frame_arrived(frame: Frame, capture_control: InternalCaptureControl):
+            buf = frame.frame_buffer  # (H, W, 4) BGRA uint8
+            result["img"] = Image.fromarray(buf[:, :, :3][:, :, ::-1])  # BGR -> RGB
+            capture_control.stop()
+            event.set()
+
+        @capture.event
+        def on_closed():
+            event.set()
+
+        try:
+            capture.start_free_threaded()
+            event.wait(timeout=timeout)
+        except Exception:
+            logger.debug("WGCセッション開始失敗", exc_info=True)
+            return None
+
+        return result.get("img")
 
     def _resize(self, img: Image.Image) -> Image.Image:
         w, h = img.size
