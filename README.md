@@ -5,6 +5,10 @@
 <!-- デモGIFをここに配置 -->
 <!-- ![BackseatSimulator Demo](docs/demo.gif) -->
 
+> **🚧 Under Construction**
+> このリポジトリは開発中のため、動作が不安定な場合があります。
+> 画面認識のみで使いたい方は、セットアップが簡単な **[Lite版](https://github.com/jiro-prog/backseatSimulator-lite)** を推奨します。
+
 ---
 
 ## 概要
@@ -164,6 +168,10 @@ For RTX 4060 Ti (8GB), `ple_offload: true` + `vision_fp16: true` with selective 
 ### Architecture
 
 See `BackseatSimulator_architecture.md` for detailed design documentation.
+
+> **🚧 Under Construction**
+> This repository is under active development and may be unstable.
+> If you only need screen recognition, the **[Lite version](https://github.com/jiro-prog/backseatSimulator-lite)** is recommended for its simpler setup.
 
 ---
 
